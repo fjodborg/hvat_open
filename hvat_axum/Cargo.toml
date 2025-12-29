@@ -1,0 +1,13 @@
+[package]
+name = "hvat_axum"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+authors = ["fjodborg <github.com/fjodborg>"]
+description = "HVAT API server (placeholder for future implementation)"
+
+[dependencies]
+# Will add axum dependencies when implementing the API server
+
+[lints]
+workspace = true

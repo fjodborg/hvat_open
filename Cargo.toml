@@ -1,103 +1,34 @@
 [workspace]
-members = ["crates/*"]
+members = ["hvat_leptos", "hvat_gpu", "hvat_axum"]
 resolver = "2"
 
-[package]
-name = "hvat"
-version = "0.1.0"
-edition = "2024"
-license = "AGPL-3.0"
-authors = ["fjodborg <github.com/fjodborg>"]
-include = ["LICENSE", "**/*.rs", "Cargo.toml"]
-default-run = "hvat-native"
+# Workspace-level dependencies for version consistency
+[workspace.dependencies]
+# Leptos ecosystem
+leptos = { version = "0.8", features = ["csr"] }
+thaw = "0.4"
+leptos-use = "0.17"
+leptos_hotkeys = "0.2"
 
-[dependencies]
-hvat_ui = { path = "crates/hvat_ui" }
-hvat_gpu = { path = "crates/hvat_gpu" }
+# WebGPU
+wgpu = "27"
 
-# Core module dependencies
-ndarray = "0.17"
-ndarray-npy = { version = "0.10", default-features = false }
-image = "0.25"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-quick-xml = { version = "0.31", features = ["serialize"] }
-thiserror = "1.0"
-log = "0.4"
-web-time = "1.1"
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Web platform
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-console_error_panic_hook = "0.1"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = [
-    "Window",
-    "Document",
-    "HtmlInputElement",
-    "HtmlAnchorElement",
-    "File",
-    "FileList",
-    "FileReader",
-    "Blob",
-    "BlobPropertyBag",
-    "Url",
-    "Event",
-    "EventTarget",
-    "Element",
-    "HtmlElement",
-    "ProgressEvent",
-    # File System Access API for folder picker
-    "FileSystemDirectoryHandle",
-    "FileSystemFileHandle",
-    "FileSystemHandle",
-    "FileSystemHandleKind",
-    # LocalStorage for config persistence
-    "Storage",
-    # Performance API for timing
-    "Performance",
-    # Canvas and ImageBitmap for async image preloading
-    "HtmlCanvasElement",
-    "CanvasRenderingContext2d",
-    "ImageBitmap",
-    "ImageData",
-    # Web Worker for async image decoding
-    "Worker",
-    "WorkerOptions",
-    "WorkerType",
-    "DedicatedWorkerGlobalScope",
-    "MessageEvent",
-    "console",
-] }
-winit = "0.29"
-wgpu = "27"
+web-sys = "0.3"
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-pollster = "0.3"
-env_logger = "0.11"
-winit = "0.29"
-wgpu = "27"
-rfd = "0.15"
-dirs = "5.0"
+# Core utilities
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
 
-[target.'cfg(target_arch = "wasm32")'.dependencies.rfd]
-version = "0.15"
-
-[lib]
-crate-type = ["cdylib", "rlib"]
-
-# Main application binary - this is the default when running `cargo run`
-# Named hvat-native to distinguish from the hvat library crate (used for WASM)
-[[bin]]
-name = "hvat-native"
-path = "src/main.rs"
-
-# Image decoder Web Worker - WASM only, used for background image decoding
-# On native, this binary just prints an error and exits (see image_decoder_worker.rs)
-[[bin]]
-name = "image-decoder-worker"
-path = "src/bin/image_decoder_worker.rs"
+# Image processing
+image = "0.25"
+ndarray = "0.17"
+ndarray-npy = { version = "0.10", default-features = false }
 
 # Production release: fully optimized, small binary (slowest to compile)
 # Build with: cargo build --release
@@ -135,9 +66,6 @@ panic = "unwind"
 [profile.dev.package."*"]
 opt-level = 2
 
-[lints]
-workspace = true
-
 [workspace.lints.rust]
 unsafe_code = "forbid"
 elided_lifetimes_in_paths = "warn"
@@ -159,6 +87,4 @@ all = "warn"
 missing_crate_level_docs = "warn"
 
 [workspace.lints.clippy]
-allow_attributes = "warn"
-# ... (keeping other lints as they were, or simplified for brevity if acceptable, but better to keep them if I can read them from previous file. I will try to preserve them)
 all = "warn"
