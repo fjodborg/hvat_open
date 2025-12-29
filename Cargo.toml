@@ -1,5 +1,5 @@
 [workspace]
-members = ["hvat_leptos", "hvat_gpu", "hvat_axum"]
+members = ["hvat_leptos", "hvat_gpu", "hvat_axum", "hvat_visual_tests"]
 resolver = "2"
 
 # Workspace-level dependencies for version consistency
