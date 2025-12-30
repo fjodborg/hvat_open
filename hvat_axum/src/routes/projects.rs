@@ -1,109 +1,72 @@
-//! Project listing endpoints.
+//! Server info and image listing endpoints.
 //!
-//! Projects are directories containing image files.
+//! The server exposes a single "project" which is the configured data directory.
+//! Clients connecting to this server see it as one project.
 
 use std::sync::Arc;
 
-use axum::{
-    Json, Router,
-    extract::{Path, State},
-    routing::get,
-};
+use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::state::AppState;
 
-/// Project information.
+/// Server/project information.
 #[derive(Debug, Serialize)]
-pub struct ProjectInfo {
-    /// Project ID (directory name, URL-safe)
-    pub id: String,
-    /// Display name
+pub struct ServerInfo {
+    /// Project name (from --name or derived from data_dir)
     pub name: String,
-    /// Full path on server
-    pub path: String,
-    /// Number of images in project
+    /// Total number of images
     pub image_count: usize,
+    /// Server version
+    pub version: String,
 }
 
-/// Image entry in a project.
+/// Image entry.
 #[derive(Debug, Serialize)]
 pub struct ImageInfo {
-    /// Image ID (filename without extension, URL-safe)
+    /// Image ID (URL-safe path)
     pub id: String,
     /// Display name (filename)
     pub name: String,
-    /// Relative path within project
+    /// Relative path within data_dir (for tree structure)
     pub path: String,
     /// Format (e.g., "PNG", "NPY")
     pub format: String,
 }
 
-/// Create the projects router.
+/// Create the router for server info and images.
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/", get(list_projects))
-        .route("/{id}/images", get(list_images))
+        .route("/info", get(get_info))
+        .route("/images", get(list_images))
 }
 
-/// List all available projects (directories in data_dir).
-async fn list_projects(State(state): State<Arc<AppState>>) -> Result<Json<Vec<ProjectInfo>>> {
+/// Get server/project information.
+async fn get_info(State(state): State<Arc<AppState>>) -> Result<Json<ServerInfo>> {
     let data_dir = &state.config.data_dir;
 
-    if !data_dir.exists() {
-        // Create data directory if it doesn't exist
-        std::fs::create_dir_all(data_dir)?;
-        return Ok(Json(vec![]));
-    }
+    // Count all images recursively
+    let image_count = count_images(data_dir, &state);
 
-    let mut projects = Vec::new();
-
-    let entries = std::fs::read_dir(data_dir)?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-
-            // Count images in this directory
-            let image_count = count_images(&path, &state);
-
-            let id = make_url_safe(&name);
-
-            projects.push(ProjectInfo {
-                id,
-                name: name.clone(),
-                path: path.to_string_lossy().to_string(),
-                image_count,
-            });
-        }
-    }
-
-    // Sort by name
-    projects.sort_by(|a, b| a.name.cmp(&b.name));
-
-    Ok(Json(projects))
+    Ok(Json(ServerInfo {
+        name: state.config.project_name.clone(),
+        image_count,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }))
 }
 
-/// List images in a project.
-async fn list_images(
-    State(state): State<Arc<AppState>>,
-    Path(project_id): Path<String>,
-) -> Result<Json<Vec<ImageInfo>>> {
+/// List all images in the data directory (recursive).
+async fn list_images(State(state): State<Arc<AppState>>) -> Result<Json<Vec<ImageInfo>>> {
     let data_dir = &state.config.data_dir;
-
-    // Find project directory
-    let project_dir = find_project_dir(data_dir, &project_id)?;
 
     let mut images = Vec::new();
-    // Use data_dir as base for ID generation so IDs match what websocket.rs expects
-    collect_images(&project_dir, data_dir, &state, &mut images);
 
-    // Sort by path
+    if data_dir.exists() {
+        collect_images(data_dir, data_dir, &state, &mut images);
+    }
+
+    // Sort by path for consistent ordering
     images.sort_by(|a, b| a.path.cmp(&b.path));
 
     Ok(Json(images))
@@ -146,6 +109,7 @@ fn collect_images(
                     .unwrap_or("unknown")
                     .to_string();
 
+                // Path relative to data_dir (for tree structure)
                 let relative_path = path
                     .strip_prefix(base_dir)
                     .unwrap_or(&path)
@@ -158,6 +122,7 @@ fn collect_images(
                     .unwrap_or("unknown")
                     .to_uppercase();
 
+                // ID is URL-safe version of relative path
                 let id = make_url_safe(&relative_path);
 
                 images.push(ImageInfo {
@@ -169,24 +134,6 @@ fn collect_images(
             }
         }
     }
-}
-
-/// Find project directory by ID.
-fn find_project_dir(data_dir: &std::path::Path, project_id: &str) -> Result<std::path::PathBuf> {
-    if let Ok(entries) = std::fs::read_dir(data_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-                if make_url_safe(name) == project_id {
-                    return Ok(path);
-                }
-            }
-        }
-    }
-
-    Err(Error::ProjectNotFound(project_id.to_string()))
 }
 
 /// Make a string URL-safe by replacing non-alphanumeric characters.

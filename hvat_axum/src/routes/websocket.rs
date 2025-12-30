@@ -394,26 +394,23 @@ fn make_url_safe(s: &str) -> String {
 }
 
 /// Calculate the target size for a pyramid level.
+///
+/// Level 0 = full resolution
+/// Level 1 = 1/2 resolution
+/// Level 2 = 1/4 resolution
+/// etc.
 fn calculate_level_size(full_width: u32, full_height: u32, level: u32) -> (u32, u32) {
-    // Calculate number of levels
-    let max_dim = full_width.max(full_height);
-    let num_levels = (max_dim as f32).log2().ceil() as u32 - 7; // Stop at ~256
-
-    if level >= num_levels {
-        // Return thumbnail size
-        let scale = 1u32 << num_levels;
-        return (
-            (full_width + scale - 1) / scale,
-            (full_height + scale - 1) / scale,
-        );
+    if level == 0 {
+        // Level 0 is always full resolution
+        return (full_width, full_height);
     }
 
-    // Level 0 is thumbnail, higher levels are larger
-    let levels_from_full = num_levels - level;
-    let scale = 1u32 << levels_from_full;
+    // Each level halves the resolution
+    let scale = 1u32 << level; // 2^level
 
-    (
-        (full_width + scale - 1) / scale,
-        (full_height + scale - 1) / scale,
-    )
+    // Ensure minimum size of 1x1
+    let width = (full_width / scale).max(1);
+    let height = (full_height / scale).max(1);
+
+    (width, height)
 }

@@ -1,16 +1,20 @@
 //! HVAT Axum Server Entry Point
 //!
-//! Run with: `cargo run -p hvat_axum`
+//! Run with: `cargo run -p hvat_axum -- --data-dir /path/to/images`
+//!
+//! Use `--help` to see all options.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
+use clap::Parser;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use hvat_axum::config::CliArgs;
 use hvat_axum::{AppState, ServerConfig, routes};
 
 #[tokio::main]
@@ -24,9 +28,17 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Load configuration
-    let config = ServerConfig::from_env();
+    // Parse CLI arguments
+    let args = CliArgs::parse();
+
+    // Load configuration from CLI
+    let config = ServerConfig::from_cli(args);
     tracing::info!("Starting HVAT server with config: {:?}", config);
+    tracing::info!(
+        "Project: {} ({})",
+        config.project_name,
+        config.data_dir.display()
+    );
 
     // Create application state
     let state = Arc::new(AppState::new(config.clone()));
