@@ -4,4 +4,8 @@ rustflags = ["-C", "target-feature=+bulk-memory"]
 
 # Avoid using all my resources when doing other things at the same time
 [build]
-jobs = 8
+jobs = 4
+
+# Limit test threads to avoid RAM exhaustion (each visual test spawns Chrome)
+[env]
+RUST_TEST_THREADS = "4"
