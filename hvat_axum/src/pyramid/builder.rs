@@ -136,10 +136,8 @@ impl PyramidBuilder {
             current_bands = downsample_bands(&current_bands, new_width, new_height);
         }
 
-        // Reverse so level 0 = thumbnail (smallest)
-        temp_levels.reverse();
-
-        // Renumber levels
+        // Level 0 = full resolution (largest), higher levels = smaller
+        // Just renumber without reversing
         let mut levels = Vec::with_capacity(temp_levels.len());
         for (idx, mut level) in temp_levels.into_iter().enumerate() {
             level.level = idx as u32;
@@ -163,22 +161,19 @@ pub fn calculate_num_levels(width: u32, height: u32) -> u32 {
 }
 
 /// Calculate dimensions for a specific pyramid level.
+///
+/// Level 0 = full resolution
+/// Level 1 = half resolution
+/// Level 2 = quarter resolution, etc.
 pub fn calculate_level_dimensions(full_width: u32, full_height: u32, level: u32) -> (u32, u32) {
-    let num_levels = calculate_num_levels(full_width, full_height);
-
-    if level >= num_levels {
+    if level == 0 {
         return (full_width, full_height);
     }
 
-    // Level 0 is smallest (thumbnail)
-    // Higher levels are larger
-    let levels_from_full = num_levels - 1 - level;
-    let scale = 1u32 << levels_from_full;
+    // Each level halves the resolution
+    let scale = 1u32 << level; // 2^level
 
-    (
-        (full_width + scale - 1) / scale,
-        (full_height + scale - 1) / scale,
-    )
+    ((full_width / scale).max(1), (full_height / scale).max(1))
 }
 
 // Implement Clone for BandData since we need it
