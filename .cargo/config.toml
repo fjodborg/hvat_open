@@ -6,6 +6,16 @@ rustflags = ["-C", "target-feature=+bulk-memory"]
 [build]
 jobs = 4
 
-# Limit test threads to avoid RAM exhaustion (each visual test spawns Chrome)
+# Limit test threads to avoid RAM exhaustion (each visual test spawns Chrome + warp server)
+# With the lightweight warp static file server, we can now run tests in parallel.
 [env]
 RUST_TEST_THREADS = "4"
+
+# Cargo aliases for common commands
+[alias]
+# Run hvat_axum server with release-dev profile (fast compile, good perf)
+serve = "run --profile release-dev -p hvat_axum -- --data-dir hvat_visual_tests/test_input"
+# Run hvat_axum with SAM enabled
+serve-sam = "run --profile release-dev -p hvat_axum -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
+# Run hvat_axum in debug mode
+serve-debug = "run -p hvat_axum -- --data-dir hvat_visual_tests/test_input"
