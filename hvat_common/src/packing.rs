@@ -126,70 +126,6 @@ pub fn pack_bands_to_rgba_layers<B: BandSlice>(
     layers
 }
 
-/// Pack raw RGBA pixel data into layers.
-///
-/// This is used when we already have RGBA u8 data (e.g., from an image crate)
-/// and just need to pack it into the layer format with proper alpha handling.
-///
-/// # Arguments
-///
-/// * `rgba_pixels` - Raw RGBA pixel data as chunks of 4 bytes [R, G, B, A]
-/// * `width` - Image width in pixels
-/// * `height` - Image height in pixels
-/// * `include_alpha` - If false, alpha channel is ignored from input and set to 255
-///
-/// # Returns
-///
-/// Vector of (layer_index, rgba_data) pairs. For standard images, this will be
-/// 2 layers (minimum for WebGL2) with the first layer containing RGB+opaque alpha.
-pub fn pack_rgba_pixels_to_layers(
-    rgba_pixels: &[u8],
-    width: u32,
-    height: u32,
-    include_alpha: bool,
-) -> Vec<(u32, Vec<u8>)> {
-    let num_pixels = (width * height) as usize;
-    let expected_size = num_pixels * 4;
-
-    assert_eq!(
-        rgba_pixels.len(),
-        expected_size,
-        "RGBA pixel data size mismatch: expected {}, got {}",
-        expected_size,
-        rgba_pixels.len()
-    );
-
-    // For standard images, we have 3 effective bands (R, G, B)
-    // We need minimum 2 layers for WebGL2
-    let mut layers = Vec::with_capacity(MIN_TEXTURE_LAYERS as usize);
-
-    // Layer 0: RGB data with alpha = 255 (or from source if include_alpha)
-    let mut layer0_data = vec![0u8; num_pixels * 4];
-    for pixel_idx in 0..num_pixels {
-        let src_offset = pixel_idx * 4;
-        let dst_offset = pixel_idx * 4;
-
-        layer0_data[dst_offset] = rgba_pixels[src_offset]; // R
-        layer0_data[dst_offset + 1] = rgba_pixels[src_offset + 1]; // G
-        layer0_data[dst_offset + 2] = rgba_pixels[src_offset + 2]; // B
-        layer0_data[dst_offset + 3] = if include_alpha {
-            rgba_pixels[src_offset + 3]
-        } else {
-            255 // Force opaque
-        };
-    }
-    layers.push((0, layer0_data));
-
-    // Layer 1: Padding layer (all zeros except alpha = 255)
-    let mut layer1_data = vec![0u8; num_pixels * 4];
-    for pixel_idx in 0..num_pixels {
-        layer1_data[pixel_idx * 4 + 3] = 255; // Alpha = opaque
-    }
-    layers.push((1, layer1_data));
-
-    layers
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,29 +198,5 @@ mod tests {
         assert_eq!(data[1], 127); // G (0.5 * 255 ≈ 127)
         assert_eq!(data[2], 0); // B
         assert_eq!(data[3], 63); // A (from band, not forced to 255)
-    }
-
-    #[test]
-    fn test_pack_rgba_pixels() {
-        // Simple 2x1 image: red pixel, green pixel
-        let rgba_pixels = vec![
-            255, 0, 0, 128, // Red pixel with 50% alpha
-            0, 255, 0, 64, // Green pixel with 25% alpha
-        ];
-
-        // Without alpha - should force to opaque
-        let layers = pack_rgba_pixels_to_layers(&rgba_pixels, 2, 1, false);
-        assert_eq!(layers.len(), 2);
-        let (_, data) = &layers[0];
-        assert_eq!(data[0], 255); // R
-        assert_eq!(data[3], 255); // A forced to 255
-        assert_eq!(data[4], 0); // R
-        assert_eq!(data[7], 255); // A forced to 255
-
-        // With alpha - should preserve
-        let layers = pack_rgba_pixels_to_layers(&rgba_pixels, 2, 1, true);
-        let (_, data) = &layers[0];
-        assert_eq!(data[3], 128); // A preserved
-        assert_eq!(data[7], 64); // A preserved
     }
 }
