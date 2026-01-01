@@ -1,0 +1,13 @@
+[package]
+name = "hvat_common"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+authors = ["fjodborg <github.com/fjodborg>"]
+description = "Shared utilities for HVAT crates - RGBA packing, band data handling"
+
+[dependencies]
+# No dependencies - pure Rust only
+
+[lints]
+workspace = true

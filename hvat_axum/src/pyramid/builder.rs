@@ -209,18 +209,18 @@ mod tests {
 
     #[test]
     fn test_calculate_level_dimensions() {
-        // For a 1024x1024 image (3 levels):
-        // Level 0: 256x256 (thumbnail)
+        // For a 1024x1024 image:
+        // Level 0: 1024x1024 (full)
         // Level 1: 512x512
-        // Level 2: 1024x1024 (full)
+        // Level 2: 256x256 (thumbnail)
 
         let (w, h) = calculate_level_dimensions(1024, 1024, 0);
-        assert_eq!((w, h), (256, 256));
+        assert_eq!((w, h), (1024, 1024));
 
         let (w, h) = calculate_level_dimensions(1024, 1024, 1);
         assert_eq!((w, h), (512, 512));
 
         let (w, h) = calculate_level_dimensions(1024, 1024, 2);
-        assert_eq!((w, h), (1024, 1024));
+        assert_eq!((w, h), (256, 256));
     }
 }

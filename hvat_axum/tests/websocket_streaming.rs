@@ -18,6 +18,7 @@ async fn start_test_server() -> SocketAddr {
         max_user_memory: 50 * 1024 * 1024,
         max_user_streams: 4,
         stream_chunk_rows: 128,
+        project_name: "test_input".to_string(),
     };
 
     let state = Arc::new(AppState::new(config));

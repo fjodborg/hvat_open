@@ -21,7 +21,7 @@ pub struct PyramidMetadata {
     pub full_height: u32,
     /// Number of spectral bands
     pub num_bands: usize,
-    /// Available pyramid levels (0 = thumbnail, highest = full res)
+    /// Available pyramid levels (0 = full res, highest index = smallest/thumbnail)
     pub levels: Vec<LevelInfo>,
     /// Hash of the source file for cache invalidation
     pub source_hash: String,
@@ -32,7 +32,7 @@ pub struct PyramidMetadata {
 /// Information about a single pyramid level.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LevelInfo {
-    /// Level index (0 = smallest/thumbnail)
+    /// Level index (0 = full resolution, higher = smaller)
     pub level: u32,
     /// Width at this level
     pub width: u32,

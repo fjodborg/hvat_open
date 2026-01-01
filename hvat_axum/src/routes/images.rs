@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, State, WebSocketUpgrade},
-    response::Response,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use serde::Serialize;
@@ -60,6 +62,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/{id}/meta", get(get_metadata))
         .route("/{id}/stream", get(stream_handler))
+        .route("/{id}/thumbnail", get(get_thumbnail))
 }
 
 /// Get image metadata.
@@ -144,6 +147,121 @@ async fn stream_handler(
     ws: WebSocketUpgrade,
 ) -> Response {
     ws.on_upgrade(move |socket| handle_websocket(socket, state, image_id))
+}
+
+/// Get a thumbnail PNG for an image.
+///
+/// Returns the pre-generated thumbnail (level 0 of pyramid) as a PNG image.
+/// If the thumbnail is not ready, returns 404.
+async fn get_thumbnail(
+    State(state): State<Arc<AppState>>,
+    Path(image_id): Path<String>,
+) -> std::result::Result<impl IntoResponse, (StatusCode, String)> {
+    // Find the image file
+    let image_path = find_image(&state, &image_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("Image not found: {}", e)))?;
+
+    // Compute image hash for cache lookup
+    let image_hash = compute_image_hash(&image_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Hash error: {}", e),
+        )
+    })?;
+
+    // Check if pyramid is ready
+    let status = state.pyramid_storage.get_status(&image_hash).await;
+    if status != PyramidStatus::Ready {
+        return Err((StatusCode::NOT_FOUND, "Thumbnail not ready".to_string()));
+    }
+
+    // Load pyramid metadata to get thumbnail dimensions
+    let metadata = state
+        .pyramid_storage
+        .load_metadata(&image_hash)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Metadata error: {}", e),
+            )
+        })?;
+
+    // Use the smallest level (highest index) as the thumbnail
+    // Level 0 = full resolution, highest level = smallest/thumbnail
+    let level_info = metadata.levels.last().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No pyramid levels".to_string(),
+        )
+    })?;
+
+    // Load the smallest level
+    let layers = state
+        .pyramid_storage
+        .load_level(&image_hash, level_info.level)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Level load error: {}", e),
+            )
+        })?;
+
+    if layers.is_empty() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No layer data".to_string(),
+        ));
+    }
+
+    // Use the first layer as the thumbnail (it's RGBA packed)
+    // Take the first layer (usually contains first 4 bands packed as RGBA)
+    let (_, rgba_data) = &layers[0];
+
+    // Create PNG image
+    let width = level_info.width;
+    let height = level_info.height;
+    let expected_size = (width * height * 4) as usize;
+
+    if rgba_data.len() != expected_size {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "Data size mismatch: got {} expected {}",
+                rgba_data.len(),
+                expected_size
+            ),
+        ));
+    }
+
+    // Create image from RGBA data and encode as PNG
+    let img = image::RgbaImage::from_raw(width, height, rgba_data.clone()).ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create image from RGBA data".to_string(),
+        )
+    })?;
+
+    let mut png_data = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut png_data);
+    img.write_to(&mut cursor, image::ImageFormat::Png)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("PNG encode error: {}", e),
+            )
+        })?;
+
+    // Return PNG response
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        Body::from(png_data),
+    ))
 }
 
 /// Find an image file by ID.

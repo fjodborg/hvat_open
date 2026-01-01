@@ -7,6 +7,9 @@ authors = ["fjodborg <github.com/fjodborg>"]
 description = "HVAT API server for hyperspectral image streaming and annotation sync"
 
 [dependencies]
+# Shared utilities
+hvat_common = { path = "../hvat_common" }
+
 # Web framework
 axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }

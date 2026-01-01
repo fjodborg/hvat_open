@@ -15,7 +15,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use hvat_axum::config::CliArgs;
-use hvat_axum::{AppState, ServerConfig, routes};
+use hvat_axum::{AppState, ServerConfig, pregenerate_pyramids, routes};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -42,6 +42,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Create application state
     let state = Arc::new(AppState::new(config.clone()));
+
+    // Pre-generate pyramids/thumbnails for all images
+    pregenerate_pyramids(state.clone()).await;
 
     // Build CORS layer for development
     let cors = CorsLayer::new()

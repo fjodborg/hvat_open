@@ -24,8 +24,10 @@ pub mod packer;
 pub mod protocol;
 pub mod pyramid;
 pub mod routes;
+pub mod startup;
 pub mod state;
 
 pub use config::ServerConfig;
 pub use error::{Error, Result};
+pub use startup::pregenerate_pyramids;
 pub use state::AppState;
