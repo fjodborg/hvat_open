@@ -24,6 +24,7 @@ pub mod packer;
 pub mod protocol;
 pub mod pyramid;
 pub mod routes;
+pub mod sam;
 pub mod startup;
 pub mod state;
 

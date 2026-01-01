@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use hvat_axum::sam::{ExecutionProvider, SamVariant};
 use hvat_axum::{AppState, ServerConfig, routes};
 
 /// Start a test server and return its address.
@@ -19,6 +20,12 @@ async fn start_test_server() -> SocketAddr {
         max_user_streams: 4,
         stream_chunk_rows: 128,
         project_name: "test_input".to_string(),
+        // SAM is disabled for basic tests
+        sam_enabled: false,
+        sam_model_dir: std::path::PathBuf::from("./.cache/models"),
+        sam_variant: SamVariant::Tiny,
+        sam_provider: ExecutionProvider::Cpu,
+        sam_cache_size: 10,
     };
 
     let state = Arc::new(AppState::new(config));
@@ -247,4 +254,296 @@ async fn test_rest_api_images() {
     assert!(images.is_array(), "Images should be an array");
 
     println!("Images: {}", serde_json::to_string_pretty(&images).unwrap());
+}
+
+#[tokio::test]
+#[should_panic(expected = "SAM initialization failed")]
+async fn test_sam_enabled_but_models_missing_should_error() {
+    // When sam_enabled=true but models don't exist, the server should panic
+    // with a clear error message instead of silently disabling SAM.
+
+    let config = ServerConfig {
+        port: 0,
+        data_dir: std::path::PathBuf::from("../hvat_visual_tests/test_input"),
+        cache_dir: std::path::PathBuf::from("./.cache/pyramids"),
+        max_cache_memory: 100 * 1024 * 1024,
+        max_user_memory: 50 * 1024 * 1024,
+        max_user_streams: 4,
+        stream_chunk_rows: 128,
+        project_name: "test_input".to_string(),
+        sam_enabled: true, // <-- USER ENABLED SAM
+        sam_model_dir: std::path::PathBuf::from("/nonexistent/path/to/models"), // Models don't exist
+        sam_variant: SamVariant::Tiny,
+        sam_provider: ExecutionProvider::Cpu,
+        sam_cache_size: 10,
+    };
+
+    // This should panic with a clear error about missing models
+    let _state = Arc::new(AppState::new(config));
+}
+
+/// Start a test server with SAM enabled (requires models in .cache/models).
+async fn start_test_server_with_sam() -> Option<SocketAddr> {
+    let model_dir = std::path::PathBuf::from("../.cache/models");
+
+    // Skip if models don't exist
+    if !model_dir.join("sam2_hiera_tiny.encoder.onnx").exists() {
+        println!("Skipping SAM test: models not found in {:?}", model_dir);
+        return None;
+    }
+
+    let config = ServerConfig {
+        port: 0,
+        data_dir: std::path::PathBuf::from("../hvat_visual_tests/test_input"),
+        cache_dir: std::path::PathBuf::from("./.cache/pyramids"),
+        max_cache_memory: 100 * 1024 * 1024,
+        max_user_memory: 50 * 1024 * 1024,
+        max_user_streams: 4,
+        stream_chunk_rows: 128,
+        project_name: "test_input".to_string(),
+        sam_enabled: true,
+        sam_model_dir: model_dir,
+        sam_variant: SamVariant::Tiny,
+        sam_provider: ExecutionProvider::Cpu,
+        sam_cache_size: 10,
+    };
+
+    let state = Arc::new(AppState::new(config));
+
+    // Verify SAM engine is available
+    assert!(
+        state.sam_engine.is_some(),
+        "SAM engine should be initialized"
+    );
+    println!("SAM engine initialized successfully");
+
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
+
+    let app = axum::Router::new()
+        .nest("/api", routes::api_router())
+        .layer(cors)
+        .with_state(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    Some(addr)
+}
+
+#[tokio::test]
+async fn test_sam_segment_e2e_with_real_models() {
+    // Real e2e test: start server with SAM, send segment request, get mask back
+    let Some(addr) = start_test_server_with_sam().await else {
+        println!("Test skipped: SAM models not available");
+        return;
+    };
+
+    // Connect to WebSocket
+    let ws_url = format!(
+        "ws://{}/api/images/subfolder_Screenshot_20251228_135208_png/stream",
+        addr
+    );
+
+    let (mut ws_stream, _) = connect_async(&ws_url)
+        .await
+        .expect("Failed to connect to WebSocket");
+
+    // Send SAM segment request with a point in the middle of the image
+    let sam_segment_msg = serde_json::json!({
+        "action": "sam_segment",
+        "image_id": "subfolder_Screenshot_20251228_135208_png",
+        "points": [
+            {"x": 200.0, "y": 150.0, "label": 1}
+        ],
+        "box": null
+    });
+
+    println!("Sending SAM segment request...");
+    ws_stream
+        .send(Message::Text(sam_segment_msg.to_string().into()))
+        .await
+        .expect("Failed to send SAM segment message");
+
+    // Wait for SAM mask response with generous timeout (first request computes embedding)
+    let mut got_sam_mask = false;
+    let mut got_error = false;
+    let mut error_message = String::new();
+    let mut polygon_count = 0;
+
+    // SAM encoding can take 10-30 seconds on CPU for first request
+    let timeout_duration = tokio::time::Duration::from_secs(60);
+    let start_time = std::time::Instant::now();
+
+    println!("Waiting for SAM response (may take up to 60s for first embedding)...");
+
+    while start_time.elapsed() < timeout_duration {
+        let msg =
+            tokio::time::timeout(tokio::time::Duration::from_millis(5000), ws_stream.next()).await;
+
+        match msg {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                println!("Received text: {}", text);
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if json["type"] == "sam_mask" {
+                        got_sam_mask = true;
+                        if let Some(polygons) = json["polygons"].as_array() {
+                            polygon_count = polygons.len();
+                        }
+                        println!("Got SAM mask with {} polygons!", polygon_count);
+                        break;
+                    } else if json["type"] == "error" {
+                        got_error = true;
+                        error_message = json["message"].as_str().unwrap_or("").to_string();
+                        println!("Got error: {}", error_message);
+                        break;
+                    }
+                }
+            }
+            Ok(Some(Ok(Message::Binary(data)))) => {
+                if !data.is_empty() && data[0] == 0x05 {
+                    let len = u16::from_le_bytes([data[1], data[2]]) as usize;
+                    error_message =
+                        String::from_utf8_lossy(&data[3..3 + len.min(data.len() - 3)]).to_string();
+                    got_error = true;
+                    println!("Got binary error: {}", error_message);
+                    break;
+                }
+            }
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                println!("Connection closed unexpectedly");
+                break;
+            }
+            Ok(Some(Err(e))) => {
+                println!("WebSocket error: {}", e);
+                break;
+            }
+            Err(_) => {
+                // Timeout on this iteration, keep waiting
+                println!(
+                    "Still waiting... ({:.1}s elapsed)",
+                    start_time.elapsed().as_secs_f32()
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let _ = ws_stream.close(None).await;
+
+    // Assertions
+    assert!(
+        !got_error,
+        "SAM request failed with error: {}",
+        error_message
+    );
+    assert!(
+        got_sam_mask,
+        "Did not receive SAM mask within timeout! This indicates the request is stuck."
+    );
+    assert!(
+        polygon_count > 0,
+        "SAM mask should contain at least one polygon"
+    );
+
+    println!(
+        "SAM e2e test passed! Got {} polygons in {:.1}s",
+        polygon_count,
+        start_time.elapsed().as_secs_f32()
+    );
+}
+
+#[tokio::test]
+async fn test_sam_segment_without_sam_enabled_returns_error() {
+    // Test that SAM segment request returns an error when SAM is not enabled
+    // This tests the protocol handling without requiring the actual models
+    let addr = start_test_server().await;
+
+    // Connect to WebSocket
+    let ws_url = format!(
+        "ws://{}/api/images/subfolder_Screenshot_20251228_135208_png/stream",
+        addr
+    );
+
+    let (mut ws_stream, _) = connect_async(&ws_url)
+        .await
+        .expect("Failed to connect to WebSocket");
+
+    // Send SAM segment request (should fail since SAM is not enabled)
+    let sam_segment_msg = serde_json::json!({
+        "action": "sam_segment",
+        "image_id": "subfolder_Screenshot_20251228_135208_png",
+        "points": [
+            {"x": 100.0, "y": 100.0, "label": 1}
+        ],
+        "box": null
+    });
+
+    ws_stream
+        .send(Message::Text(sam_segment_msg.to_string().into()))
+        .await
+        .expect("Failed to send SAM segment message");
+
+    // We should receive an error response (JSON text message)
+    let mut received_error = false;
+    let timeout_duration = tokio::time::Duration::from_secs(5);
+    let start_time = std::time::Instant::now();
+
+    while start_time.elapsed() < timeout_duration {
+        let msg =
+            tokio::time::timeout(tokio::time::Duration::from_millis(1000), ws_stream.next()).await;
+
+        match msg {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                println!("Received text message: {}", text);
+                // Check if it's an error about SAM not being enabled
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if json["type"] == "error" {
+                        println!("Got expected error: {}", json["message"]);
+                        received_error = true;
+                        break;
+                    }
+                }
+            }
+            Ok(Some(Ok(Message::Binary(data)))) => {
+                // Binary message - could be an error
+                if !data.is_empty() && data[0] == 0x05 {
+                    // Error message type
+                    let len = u16::from_le_bytes([data[1], data[2]]) as usize;
+                    let error_msg = String::from_utf8_lossy(&data[3..3 + len.min(data.len() - 3)]);
+                    println!("Got binary error: {}", error_msg);
+                    received_error = true;
+                    break;
+                }
+            }
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                println!("Connection closed");
+                break;
+            }
+            Ok(Some(Err(e))) => {
+                println!("WebSocket error: {}", e);
+                break;
+            }
+            Err(_) => {
+                // Timeout
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        received_error,
+        "Should have received an error since SAM is not enabled"
+    );
+
+    let _ = ws_stream.close(None).await;
 }

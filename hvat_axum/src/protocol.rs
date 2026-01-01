@@ -69,6 +69,8 @@ pub enum ServerResponse {
         request_id: String,
         /// Each polygon is a flat array [x1, y1, x2, y2, ...]
         polygons: Vec<Vec<f32>>,
+        /// IoU scores for each mask (0.0 to 1.0)
+        iou_scores: Vec<f32>,
     },
 
     /// SAM embedding is ready

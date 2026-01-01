@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+use crate::sam::{ExecutionProvider, SamVariant};
+
 /// HVAT Axum Server - Hyperspectral image streaming server.
 #[derive(Parser, Debug, Clone)]
 #[command(name = "hvat-server")]
@@ -43,6 +45,27 @@ pub struct CliArgs {
     /// Defaults to the data directory name.
     #[arg(short = 'n', long, env = "HVAT_PROJECT_NAME")]
     pub name: Option<String>,
+
+    // --- SAM Configuration ---
+    /// Enable SAM (Segment Anything Model) integration.
+    #[arg(long, env = "HVAT_SAM_ENABLED", default_value = "false")]
+    pub sam_enabled: bool,
+
+    /// SAM model directory. Defaults to ./.cache/models
+    #[arg(long, env = "HVAT_SAM_MODEL_DIR")]
+    pub sam_model_dir: Option<PathBuf>,
+
+    /// SAM model variant: tiny, small, base-plus, large
+    #[arg(long, env = "HVAT_SAM_VARIANT", default_value = "tiny")]
+    pub sam_variant: String,
+
+    /// SAM execution provider: auto, cpu, cuda, rocm, directml, coreml
+    #[arg(long, env = "HVAT_SAM_PROVIDER", default_value = "auto")]
+    pub sam_provider: String,
+
+    /// Maximum cached image embeddings for SAM
+    #[arg(long, env = "HVAT_SAM_CACHE_SIZE", default_value = "50")]
+    pub sam_cache_size: usize,
 }
 
 /// Server configuration.
@@ -71,6 +94,22 @@ pub struct ServerConfig {
 
     /// Project name (display name)
     pub project_name: String,
+
+    // --- SAM Configuration ---
+    /// Enable SAM integration
+    pub sam_enabled: bool,
+
+    /// SAM model directory
+    pub sam_model_dir: PathBuf,
+
+    /// SAM model variant
+    pub sam_variant: SamVariant,
+
+    /// SAM execution provider
+    pub sam_provider: ExecutionProvider,
+
+    /// Maximum cached embeddings
+    pub sam_cache_size: usize,
 }
 
 impl Default for ServerConfig {
@@ -84,13 +123,26 @@ impl Default for ServerConfig {
             max_user_streams: 4,
             stream_chunk_rows: 128,
             project_name: "data".to_string(),
+            // SAM defaults
+            sam_enabled: false,
+            sam_model_dir: crate::sam::models::default_model_dir(),
+            sam_variant: SamVariant::default(),
+            sam_provider: ExecutionProvider::default(),
+            sam_cache_size: 50,
         }
     }
 }
 
 impl ServerConfig {
     /// Create configuration from CLI arguments.
+    ///
+    /// # Panics
+    ///
+    /// Panics if SAM-specific flags are used without `--sam-enabled`.
     pub fn from_cli(args: CliArgs) -> Self {
+        // Validate SAM configuration - error if SAM flags used without --sam-enabled
+        Self::validate_sam_flags(&args);
+
         // Derive project name from data_dir if not specified
         let project_name = args.name.unwrap_or_else(|| {
             args.data_dir
@@ -99,6 +151,21 @@ impl ServerConfig {
                 .unwrap_or("project")
                 .to_string()
         });
+
+        // Parse SAM variant
+        let sam_variant = SamVariant::from_str(&args.sam_variant).unwrap_or_default();
+
+        // Parse SAM provider (auto = detect best available)
+        let sam_provider = if args.sam_provider == "auto" {
+            crate::sam::engine::detect_best_provider()
+        } else {
+            ExecutionProvider::from_str(&args.sam_provider).unwrap_or_default()
+        };
+
+        // SAM model directory
+        let sam_model_dir = args
+            .sam_model_dir
+            .unwrap_or_else(crate::sam::models::default_model_dir);
 
         Self {
             port: args.port,
@@ -109,6 +176,56 @@ impl ServerConfig {
             max_user_streams: args.max_streams,
             stream_chunk_rows: args.chunk_rows,
             project_name,
+            // SAM
+            sam_enabled: args.sam_enabled,
+            sam_model_dir,
+            sam_variant,
+            sam_provider,
+            sam_cache_size: args.sam_cache_size,
+        }
+    }
+
+    /// Validate SAM-related CLI flags.
+    ///
+    /// Panics if SAM-specific flags are used without `--sam-enabled`.
+    fn validate_sam_flags(args: &CliArgs) {
+        if args.sam_enabled {
+            return; // All good, SAM is enabled
+        }
+
+        // Check if any SAM-specific flags were explicitly set (not defaults)
+        let has_custom_variant = args.sam_variant != "tiny";
+        let has_custom_provider = args.sam_provider != "auto";
+        let has_custom_model_dir = args.sam_model_dir.is_some();
+        let has_custom_cache_size = args.sam_cache_size != 50;
+
+        let mut issues = Vec::new();
+        if has_custom_variant {
+            issues.push(format!("--sam-variant={}", args.sam_variant));
+        }
+        if has_custom_provider {
+            issues.push(format!("--sam-provider={}", args.sam_provider));
+        }
+        if has_custom_model_dir {
+            issues.push(format!(
+                "--sam-model-dir={}",
+                args.sam_model_dir.as_ref().unwrap().display()
+            ));
+        }
+        if has_custom_cache_size {
+            issues.push(format!("--sam-cache-size={}", args.sam_cache_size));
+        }
+
+        if !issues.is_empty() {
+            panic!(
+                "\n\nERROR: SAM flags specified without --sam-enabled!\n\n\
+                 The following SAM flags were set:\n  {}\n\n\
+                 But --sam-enabled was not specified (defaults to false).\n\n\
+                 To enable SAM, add --sam-enabled to your command:\n  \
+                 cargo run -p hvat_axum -- --sam-enabled {}\n\n",
+                issues.join("\n  "),
+                issues.join(" ")
+            );
         }
     }
 
