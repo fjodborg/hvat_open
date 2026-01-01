@@ -159,9 +159,14 @@ impl OnnxSamEngine {
 
             log::debug!(
                 "Box prompt scaled: ({}, {}) -> ({}, {}) to ({:.1}, {:.1}) -> ({:.1}, {:.1})",
-                x1, y1, x2, y2,
-                x1 * scale_x, y1 * scale_y,
-                x2 * scale_x, y2 * scale_y
+                x1,
+                y1,
+                x2,
+                y2,
+                x1 * scale_x,
+                y1 * scale_y,
+                x2 * scale_x,
+                y2 * scale_y
             );
         }
 
