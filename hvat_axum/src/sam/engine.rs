@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use hvat_common::{bilinear_sample, pixel_count, pixel_count_u32};
 use ort::session::Session;
 use ort::value::Tensor;
 
@@ -202,7 +203,7 @@ impl OnnxSamEngine {
             Self::bilinear_upsample(mask_data, mask_width, mask_height, hi_res_w, hi_res_h);
 
         // Step 2: Threshold and scale to original image size
-        let mut binary_mask = vec![0u8; (original_width * original_height) as usize];
+        let mut binary_mask = vec![0u8; pixel_count_u32(original_width, original_height)];
 
         let scale_x = hi_res_w as f32 / original_width as f32;
         let scale_y = hi_res_h as f32 / original_height as f32;
@@ -213,7 +214,7 @@ impl OnnxSamEngine {
                 let src_x = x as f32 * scale_x;
                 let src_y = y as f32 * scale_y;
 
-                let value = Self::bilinear_sample(&hi_res_mask, hi_res_w, hi_res_h, src_x, src_y);
+                let value = bilinear_sample(&hi_res_mask, hi_res_w, hi_res_h, src_x, src_y);
 
                 // Threshold at 0 (logits)
                 if value > 0.0 {
@@ -236,7 +237,7 @@ impl OnnxSamEngine {
         dst_w: usize,
         dst_h: usize,
     ) -> Vec<f32> {
-        let mut result = vec![0.0f32; dst_w * dst_h];
+        let mut result = vec![0.0f32; pixel_count(dst_w, dst_h)];
 
         for dst_y in 0..dst_h {
             for dst_x in 0..dst_w {
@@ -244,33 +245,11 @@ impl OnnxSamEngine {
                 let src_x = (dst_x as f32 + 0.5) * (src_w as f32 / dst_w as f32) - 0.5;
                 let src_y = (dst_y as f32 + 0.5) * (src_h as f32 / dst_h as f32) - 0.5;
 
-                result[dst_y * dst_w + dst_x] =
-                    Self::bilinear_sample(data, src_w, src_h, src_x, src_y);
+                result[dst_y * dst_w + dst_x] = bilinear_sample(data, src_w, src_h, src_x, src_y);
             }
         }
 
         result
-    }
-
-    /// Sample a value from a 2D array using bilinear interpolation.
-    fn bilinear_sample(data: &[f32], width: usize, height: usize, x: f32, y: f32) -> f32 {
-        let x0 = (x.floor() as isize).clamp(0, width as isize - 1) as usize;
-        let y0 = (y.floor() as isize).clamp(0, height as isize - 1) as usize;
-        let x1 = (x0 + 1).min(width - 1);
-        let y1 = (y0 + 1).min(height - 1);
-
-        let fx = (x - x.floor()).clamp(0.0, 1.0);
-        let fy = (y - y.floor()).clamp(0.0, 1.0);
-
-        let v00 = data[y0 * width + x0];
-        let v10 = data[y0 * width + x1];
-        let v01 = data[y1 * width + x0];
-        let v11 = data[y1 * width + x1];
-
-        let v0 = v00 * (1.0 - fx) + v10 * fx;
-        let v1 = v01 * (1.0 - fx) + v11 * fx;
-
-        v0 * (1.0 - fy) + v1 * fy
     }
 
     /// Extract contour of the largest connected component using flood fill + Moore-Neighbor tracing.

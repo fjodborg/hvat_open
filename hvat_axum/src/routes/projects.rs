@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::error::Result;
 use crate::state::AppState;
+use crate::utils::make_url_safe;
 
 /// Server/project information.
 #[derive(Debug, Serialize)]
@@ -134,17 +135,4 @@ fn collect_images(
             }
         }
     }
-}
-
-/// Make a string URL-safe by replacing non-alphanumeric characters.
-fn make_url_safe(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }

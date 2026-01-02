@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use hvat_common::pixel_count_u32;
 use image::GenericImageView;
 
 use super::{BandData, ImageLoader, ImageMetadata};
@@ -92,7 +93,7 @@ impl ImageLoader for StandardImageLoader {
             let rgba = img.to_rgba8();
             let pixels = rgba.as_raw();
 
-            let num_pixels = (width * height) as usize;
+            let num_pixels = pixel_count_u32(width, height);
 
             // Extract R, G, B channels as separate f32 bands (normalized 0.0-1.0)
             let mut red = Vec::with_capacity(num_pixels);

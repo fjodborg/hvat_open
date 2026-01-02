@@ -3,8 +3,11 @@
 //! Pre-exported ONNX models are available from Hugging Face:
 //! <https://huggingface.co/vietanhdev/segment-anything-2-onnx-models>
 
-use anyhow::{Context, Result};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+use anyhow::{Context, Result};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
@@ -24,18 +27,37 @@ pub enum SamVariant {
     Large,
 }
 
-impl SamVariant {
-    /// Parse from string (for CLI/env config).
-    pub fn from_str(s: &str) -> Option<Self> {
+/// Error returned when parsing an invalid SAM variant string.
+#[derive(Debug, Clone)]
+pub struct ParseSamVariantError(String);
+
+impl fmt::Display for ParseSamVariantError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown SAM variant '{}', expected one of: tiny, small, base_plus, large",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ParseSamVariantError {}
+
+impl FromStr for SamVariant {
+    type Err = ParseSamVariantError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "tiny" | "t" => Some(Self::Tiny),
-            "small" | "s" => Some(Self::Small),
-            "base_plus" | "base-plus" | "baseplus" | "b+" => Some(Self::BasePlus),
-            "large" | "l" => Some(Self::Large),
-            _ => None,
+            "tiny" | "t" => Ok(Self::Tiny),
+            "small" | "s" => Ok(Self::Small),
+            "base_plus" | "base-plus" | "baseplus" | "b+" => Ok(Self::BasePlus),
+            "large" | "l" => Ok(Self::Large),
+            _ => Err(ParseSamVariantError(s.to_string())),
         }
     }
+}
 
+impl SamVariant {
     /// Get the encoder ONNX filename.
     pub fn encoder_filename(&self) -> &'static str {
         match self {
@@ -189,14 +211,14 @@ mod tests {
 
     #[test]
     fn test_variant_parsing() {
-        assert_eq!(SamVariant::from_str("tiny"), Some(SamVariant::Tiny));
-        assert_eq!(SamVariant::from_str("SMALL"), Some(SamVariant::Small));
+        assert_eq!("tiny".parse::<SamVariant>().ok(), Some(SamVariant::Tiny));
+        assert_eq!("SMALL".parse::<SamVariant>().ok(), Some(SamVariant::Small));
         assert_eq!(
-            SamVariant::from_str("base-plus"),
+            "base-plus".parse::<SamVariant>().ok(),
             Some(SamVariant::BasePlus)
         );
-        assert_eq!(SamVariant::from_str("large"), Some(SamVariant::Large));
-        assert_eq!(SamVariant::from_str("invalid"), None);
+        assert_eq!("large".parse::<SamVariant>().ok(), Some(SamVariant::Large));
+        assert!("invalid".parse::<SamVariant>().is_err());
     }
 
     #[test]

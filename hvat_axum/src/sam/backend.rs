@@ -3,6 +3,9 @@
 //! Defines the interface for SAM inference backends, enabling
 //! different implementations (ONNX, future alternatives).
 
+use std::fmt;
+use std::str::FromStr;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -25,19 +28,38 @@ pub enum ExecutionProvider {
     CoreML,
 }
 
-impl ExecutionProvider {
-    /// Parse from string (for CLI/env config).
-    pub fn from_str(s: &str) -> Option<Self> {
+/// Error returned when parsing an invalid execution provider string.
+#[derive(Debug, Clone)]
+pub struct ParseExecutionProviderError(String);
+
+impl fmt::Display for ParseExecutionProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown execution provider '{}', expected one of: cpu, cuda, rocm, directml, coreml",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ParseExecutionProviderError {}
+
+impl FromStr for ExecutionProvider {
+    type Err = ParseExecutionProviderError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "cpu" => Some(Self::Cpu),
-            "cuda" => Some(Self::Cuda),
-            "rocm" => Some(Self::Rocm),
-            "directml" => Some(Self::DirectML),
-            "coreml" => Some(Self::CoreML),
-            _ => None,
+            "cpu" => Ok(Self::Cpu),
+            "cuda" => Ok(Self::Cuda),
+            "rocm" => Ok(Self::Rocm),
+            "directml" => Ok(Self::DirectML),
+            "coreml" => Ok(Self::CoreML),
+            _ => Err(ParseExecutionProviderError(s.to_string())),
         }
     }
+}
 
+impl ExecutionProvider {
     /// Get display name.
     pub fn name(&self) -> &'static str {
         match self {

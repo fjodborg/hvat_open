@@ -27,6 +27,7 @@ pub mod routes;
 pub mod sam;
 pub mod startup;
 pub mod state;
+pub mod utils;
 
 pub use config::ServerConfig;
 pub use error::{Error, Result};

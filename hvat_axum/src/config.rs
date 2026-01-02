@@ -153,13 +153,13 @@ impl ServerConfig {
         });
 
         // Parse SAM variant
-        let sam_variant = SamVariant::from_str(&args.sam_variant).unwrap_or_default();
+        let sam_variant = args.sam_variant.parse().unwrap_or_default();
 
         // Parse SAM provider (auto = detect best available)
         let sam_provider = if args.sam_provider == "auto" {
             crate::sam::engine::detect_best_provider()
         } else {
-            ExecutionProvider::from_str(&args.sam_provider).unwrap_or_default()
+            args.sam_provider.parse().unwrap_or_default()
         };
 
         // SAM model directory

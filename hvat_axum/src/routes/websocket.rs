@@ -1,9 +1,11 @@
 //! WebSocket handler for binary image streaming.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
+use hvat_common::pixel_count_u32;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -16,6 +18,7 @@ use crate::protocol::{
 use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::sam::{CachedEmbedding, EncoderOutput, SamPoint as BackendSamPoint};
 use crate::state::AppState;
+use crate::utils::find_image;
 
 /// Handle a WebSocket connection for image streaming.
 pub async fn handle_websocket(socket: WebSocket, state: Arc<AppState>, image_id: String) {
@@ -42,7 +45,8 @@ pub async fn handle_websocket(socket: WebSocket, state: Arc<AppState>, image_id:
                 match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(client_msg) => {
                         if let Err(e) =
-                            handle_client_message(client_msg, &state, &image_id, tx.clone()).await
+                            handle_client_message(client_msg, state.clone(), &image_id, tx.clone())
+                                .await
                         {
                             // Send error response
                             let error_bytes = encode_error(&e.to_string());
@@ -73,7 +77,7 @@ pub async fn handle_websocket(socket: WebSocket, state: Arc<AppState>, image_id:
 /// Handle a parsed client message.
 async fn handle_client_message(
     msg: ClientMessage,
-    state: &AppState,
+    state: Arc<AppState>,
     image_id: &str,
     tx: mpsc::Sender<Message>,
 ) -> Result<(), Error> {
@@ -84,7 +88,7 @@ async fn handle_client_message(
         } => {
             // Verify image_id matches (or use the one from the URL)
             let id = if req_id.is_empty() { image_id } else { &req_id };
-            stream_image(state, id, level, tx).await?;
+            stream_image(state.clone(), id, level, tx).await?;
         }
 
         ClientMessage::CancelStream => {
@@ -94,7 +98,7 @@ async fn handle_client_message(
 
         ClientMessage::ChangeLevel { level } => {
             // For now, just start a new stream at the new level
-            stream_image(state, image_id, level, tx).await?;
+            stream_image(state.clone(), image_id, level, tx).await?;
         }
 
         ClientMessage::SaveAnnotations {
@@ -123,7 +127,7 @@ async fn handle_client_message(
 
         ClientMessage::SamEmbed { image_id: req_id } => {
             let id = if req_id.is_empty() { image_id } else { &req_id };
-            handle_sam_embed(state, id, tx).await?;
+            handle_sam_embed(&state, id, tx).await?;
         }
 
         ClientMessage::SamSegment {
@@ -132,7 +136,7 @@ async fn handle_client_message(
             box_prompt,
         } => {
             let id = if req_id.is_empty() { image_id } else { &req_id };
-            handle_sam_segment(state, id, points, box_prompt, tx).await?;
+            handle_sam_segment(&state, id, points, box_prompt, tx).await?;
         }
     }
 
@@ -141,13 +145,13 @@ async fn handle_client_message(
 
 /// Stream an image at a specific pyramid level.
 async fn stream_image(
-    state: &AppState,
+    state: Arc<AppState>,
     image_id: &str,
     level: u32,
     tx: mpsc::Sender<Message>,
 ) -> Result<(), Error> {
     // Find the image file
-    let image_path = find_image(state, image_id)?;
+    let image_path = find_image(&state, image_id)?;
 
     // Compute hash for pyramid cache lookup
     let image_hash = compute_image_hash(&image_path)?;
@@ -158,43 +162,24 @@ async fn stream_image(
     match pyramid_status {
         PyramidStatus::Ready => {
             // Stream from cached pyramid
-            stream_from_pyramid(state, &image_hash, level, tx).await
+            stream_from_pyramid(&state, &image_hash, level, tx).await
         }
         PyramidStatus::Building => {
             // Pyramid is being built, stream directly from source for now
             tracing::info!("Pyramid {} is building, streaming from source", image_hash);
-            stream_from_source(state, &image_path, image_id, level, tx).await
+            stream_from_source(&state, &image_path, image_id, level, tx).await
         }
         PyramidStatus::Pending | PyramidStatus::Failed => {
-            // Start building pyramid in background
-            let builder = state.pyramid_builder.clone();
-            let storage = state.pyramid_storage.clone();
-            let loaders = state.loaders.clone();
-            let path_clone = image_path.clone();
-            let hash_clone = image_hash.clone();
-
-            tokio::spawn(async move {
-                tracing::info!("Starting pyramid generation for {}", hash_clone);
-                if let Some(loader) = loaders.find_loader(&path_clone) {
-                    match loader.load_bands(&path_clone).await {
-                        Ok(bands) => {
-                            if let Err(e) = builder.build_and_save(&hash_clone, &bands).await {
-                                tracing::error!("Failed to build pyramid: {}", e);
-                                let _ = storage.mark_failed(&hash_clone, &e.to_string()).await;
-                            } else {
-                                tracing::info!("Pyramid {} built successfully", hash_clone);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to load bands for pyramid: {}", e);
-                            let _ = storage.mark_failed(&hash_clone, &e.to_string()).await;
-                        }
-                    }
-                }
-            });
+            // Check if a task is already running for this hash
+            if state.pyramid_tasks.read().await.contains_key(&image_hash) {
+                tracing::debug!("Pyramid task already running for {}", image_hash);
+            } else {
+                // Start building pyramid in background
+                spawn_pyramid_task(state.clone(), &image_path, &image_hash).await;
+            }
 
             // Stream directly from source while pyramid is being built
-            stream_from_source(state, &image_path, image_id, level, tx).await
+            stream_from_source(&state, &image_path, image_id, level, tx).await
         }
     }
 }
@@ -346,60 +331,6 @@ async fn stream_from_source(
     Ok(())
 }
 
-/// Find an image file by ID.
-fn find_image(state: &AppState, image_id: &str) -> Result<std::path::PathBuf, Error> {
-    let data_dir = &state.config.data_dir;
-
-    if let Some(path) = search_for_image(data_dir, image_id, state) {
-        return Ok(path);
-    }
-
-    Err(Error::ImageNotFound(image_id.to_string()))
-}
-
-/// Recursively search for an image matching the ID.
-fn search_for_image(
-    dir: &std::path::Path,
-    image_id: &str,
-    state: &AppState,
-) -> Option<std::path::PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = search_for_image(&path, image_id, state) {
-                return Some(found);
-            }
-        } else if state.loaders.supports(&path) {
-            let relative_path = path
-                .strip_prefix(&state.config.data_dir)
-                .unwrap_or(&path)
-                .to_string_lossy();
-
-            let file_id = make_url_safe(&relative_path);
-            if file_id == image_id {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
-/// Make a string URL-safe.
-fn make_url_safe(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 /// Calculate the target size for a pyramid level.
 ///
 /// Level 0 = full resolution
@@ -420,6 +351,59 @@ fn calculate_level_size(full_width: u32, full_height: u32, level: u32) -> (u32, 
     let height = (full_height / scale).max(1);
 
     (width, height)
+}
+
+/// Spawn a tracked pyramid build task.
+///
+/// The task is registered in `AppState::pyramid_tasks` so it can be:
+/// - Detected to avoid duplicate builds for the same image
+/// - Cancelled if needed (future enhancement)
+/// - Cleaned up when complete
+async fn spawn_pyramid_task(state: Arc<AppState>, image_path: &Path, image_hash: &str) {
+    let builder = state.pyramid_builder.clone();
+    let storage = state.pyramid_storage.clone();
+    let loaders = state.loaders.clone();
+    let path = image_path.to_path_buf();
+    let hash = image_hash.to_string();
+    let hash_for_insert = hash.clone();
+    let state_for_cleanup = state.clone();
+
+    let handle = tokio::spawn(async move {
+        tracing::info!("Starting pyramid generation for {}", hash);
+
+        let result = if let Some(loader) = loaders.find_loader(&path) {
+            match loader.load_bands(&path).await {
+                Ok(bands) => {
+                    if let Err(e) = builder.build_and_save(&hash, &bands).await {
+                        tracing::error!("Failed to build pyramid: {}", e);
+                        let _ = storage.mark_failed(&hash, &e.to_string()).await;
+                    } else {
+                        tracing::info!("Pyramid {} built successfully", hash);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load bands for pyramid: {}", e);
+                    let _ = storage.mark_failed(&hash, &e.to_string()).await;
+                }
+            }
+        };
+
+        // Clean up: remove ourselves from the task registry
+        state_for_cleanup
+            .pyramid_tasks
+            .write()
+            .await
+            .remove(&hash);
+
+        result
+    });
+
+    // Register the task
+    state
+        .pyramid_tasks
+        .write()
+        .await
+        .insert(hash_for_insert, handle);
 }
 
 // ============================================================================
@@ -621,7 +605,7 @@ async fn load_image_rgb(
 
     let width = bands.width;
     let height = bands.height;
-    let num_pixels = (width * height) as usize;
+    let num_pixels = pixel_count_u32(width, height);
 
     // Convert to RGB
     let rgb_data = if bands.bands.len() >= 3 {

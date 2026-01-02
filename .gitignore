@@ -19,6 +19,4 @@ dist/
 debug/
 
 # TODO: remove these once settled on assets
-assets/
-*.md
-*.lock
+.cache

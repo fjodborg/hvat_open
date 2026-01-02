@@ -10,11 +10,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use hvat_common::pixel_count_u32;
 use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::state::AppState;
+use crate::utils::find_image;
 
 use super::websocket::handle_websocket;
 
@@ -222,7 +224,7 @@ async fn get_thumbnail(
     // Create PNG image
     let width = level_info.width;
     let height = level_info.height;
-    let expected_size = (width * height * 4) as usize;
+    let expected_size = pixel_count_u32(width, height).checked_mul(4).unwrap();
 
     if rgba_data.len() != expected_size {
         return Err((
@@ -262,63 +264,6 @@ async fn get_thumbnail(
         ],
         Body::from(png_data),
     ))
-}
-
-/// Find an image file by ID.
-fn find_image(state: &AppState, image_id: &str) -> Result<std::path::PathBuf> {
-    // The image_id is URL-safe, we need to search for the actual file
-    let data_dir = &state.config.data_dir;
-
-    // Search recursively in data_dir
-    if let Some(path) = search_for_image(data_dir, image_id, state) {
-        return Ok(path);
-    }
-
-    Err(Error::ImageNotFound(image_id.to_string()))
-}
-
-/// Recursively search for an image matching the ID.
-fn search_for_image(
-    dir: &std::path::Path,
-    image_id: &str,
-    state: &AppState,
-) -> Option<std::path::PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = search_for_image(&path, image_id, state) {
-                return Some(found);
-            }
-        } else if state.loaders.supports(&path) {
-            // Check if this file matches the image_id
-            let relative_path = path
-                .strip_prefix(&state.config.data_dir)
-                .unwrap_or(&path)
-                .to_string_lossy();
-
-            let file_id = make_url_safe(&relative_path);
-            if file_id == image_id {
-                return Some(path);
-            }
-        }
-    }
-
-    None
-}
-
-/// Make a string URL-safe.
-fn make_url_safe(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 /// Calculate pyramid levels for an image.

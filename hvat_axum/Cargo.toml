@@ -36,6 +36,9 @@ lru = "0.12"
 # ONNX Runtime for SAM inference
 ort = "2.0.0-rc.10"
 
+# Parallel processing
+rayon = "1.10"
+
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"

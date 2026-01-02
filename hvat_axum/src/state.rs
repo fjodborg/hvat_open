@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 
 use crate::config::ServerConfig;
 use crate::loaders::{ImageLoaderRegistry, NpyLoader, StandardImageLoader};
@@ -26,6 +27,12 @@ pub struct AppState {
 
     /// Active user sessions (user_id -> session state)
     pub sessions: RwLock<HashMap<String, SessionState>>,
+
+    /// Active pyramid build tasks (image_hash -> task handle)
+    ///
+    /// Used to track and potentially cancel in-progress pyramid builds.
+    /// Tasks are removed when they complete (success or failure).
+    pub pyramid_tasks: RwLock<HashMap<String, JoinHandle<()>>>,
 
     /// SAM engine for AI-assisted segmentation (None if SAM is disabled)
     pub sam_engine: Option<Arc<dyn SamBackend>>,
@@ -97,6 +104,7 @@ impl AppState {
             pyramid_storage,
             pyramid_builder,
             sessions: RwLock::new(HashMap::new()),
+            pyramid_tasks: RwLock::new(HashMap::new()),
             sam_engine,
             embedding_cache,
         }
