@@ -389,11 +389,7 @@ async fn spawn_pyramid_task(state: Arc<AppState>, image_path: &Path, image_hash:
         };
 
         // Clean up: remove ourselves from the task registry
-        state_for_cleanup
-            .pyramid_tasks
-            .write()
-            .await
-            .remove(&hash);
+        state_for_cleanup.pyramid_tasks.write().await.remove(&hash);
 
         result
     });
