@@ -12,8 +12,9 @@ use uuid::Uuid;
 use crate::error::Error;
 use crate::packer::{downsample_bands, pack_bands_to_rgba_layers};
 use crate::protocol::{
-    ClientMessage, SamPoint as ProtocolSamPoint, ServerResponse, StreamMetadata, encode_error,
-    encode_layer_chunk, encode_layer_complete, encode_level_complete,
+    ClientMessage, ErrorCode, ProtocolError, SamPoint as ProtocolSamPoint, ServerResponse,
+    StreamMetadata, encode_error, encode_layer_chunk, encode_layer_complete, encode_level_complete,
+    encode_reset,
 };
 use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::sam::{CachedEmbedding, EncoderOutput, SamPoint as BackendSamPoint};
@@ -49,7 +50,9 @@ pub async fn handle_websocket(socket: WebSocket, state: Arc<AppState>, image_id:
                                 .await
                         {
                             // Send error response
-                            let error_bytes = encode_error(&e.to_string());
+                            let error =
+                                ProtocolError::error(ErrorCode::InternalError, e.to_string());
+                            let error_bytes = encode_error(&error);
                             let _ = tx.send(Message::Binary(error_bytes.into())).await;
                         }
                     }
@@ -82,61 +85,35 @@ async fn handle_client_message(
     tx: mpsc::Sender<Message>,
 ) -> Result<(), Error> {
     match msg {
-        ClientMessage::StartStream {
-            image_id: req_id,
-            level,
-        } => {
-            // Verify image_id matches (or use the one from the URL)
-            let id = if req_id.is_empty() { image_id } else { &req_id };
-            stream_image(state.clone(), id, level, tx).await?;
+        ClientMessage::StartStream { level, progressive } => {
+            // image_id comes from the WebSocket URL path
+            if progressive {
+                // TODO: Implement progressive loading (multiple levels)
+                tracing::info!(
+                    "Progressive loading requested for {}, starting at level {}",
+                    image_id,
+                    level
+                );
+            }
+            stream_image(state.clone(), image_id, level, tx).await?;
         }
 
-        ClientMessage::CancelStream => {
+        ClientMessage::Cancel => {
             // Cancellation is handled by dropping the tx channel
             tracing::info!("Stream cancelled for {}", image_id);
         }
 
-        ClientMessage::ChangeLevel { level } => {
-            // For now, just start a new stream at the new level
-            stream_image(state.clone(), image_id, level, tx).await?;
+        ClientMessage::SamEmbed => {
+            handle_sam_embed(&state, image_id, tx).await?;
         }
 
-        ClientMessage::SaveAnnotations {
-            image_id: _,
-            annotations: _,
-            categories: _,
-        } => {
-            // TODO: Implement annotation storage
-            let response = ServerResponse::Error {
-                message: "Annotation storage not yet implemented".to_string(),
-            };
-            if let Ok(json) = serde_json::to_string(&response) {
-                let _ = tx.send(Message::Text(json.into())).await;
-            }
+        ClientMessage::SamSegment { points, box_prompt } => {
+            handle_sam_segment(&state, image_id, points, box_prompt, tx).await?;
         }
 
-        ClientMessage::LoadAnnotations { image_id: _ } => {
-            // TODO: Implement annotation loading
-            let response = ServerResponse::Error {
-                message: "Annotation loading not yet implemented".to_string(),
-            };
-            if let Ok(json) = serde_json::to_string(&response) {
-                let _ = tx.send(Message::Text(json.into())).await;
-            }
-        }
-
-        ClientMessage::SamEmbed { image_id: req_id } => {
-            let id = if req_id.is_empty() { image_id } else { &req_id };
-            handle_sam_embed(&state, id, tx).await?;
-        }
-
-        ClientMessage::SamSegment {
-            image_id: req_id,
-            points,
-            box_prompt,
-        } => {
-            let id = if req_id.is_empty() { image_id } else { &req_id };
-            handle_sam_segment(&state, id, points, box_prompt, tx).await?;
+        ClientMessage::Pong { timestamp } => {
+            tracing::debug!("Received pong: {}", timestamp);
+            // Could track connection health here
         }
     }
 
@@ -199,6 +176,11 @@ async fn stream_from_pyramid(
     let level = level.min(max_level);
 
     let level_info = &metadata.levels[level as usize];
+
+    // Send Reset message to clear display before new image
+    tx.send(Message::Binary(encode_reset().into()))
+        .await
+        .map_err(|_| Error::Internal("Failed to send reset".to_string()))?;
 
     // Send stream metadata
     let stream_meta = StreamMetadata {
@@ -275,6 +257,11 @@ async fn stream_from_source(
     } else {
         bands
     };
+
+    // Send Reset message to clear display before new image
+    tx.send(Message::Binary(encode_reset().into()))
+        .await
+        .map_err(|_| Error::Internal("Failed to send reset".to_string()))?;
 
     // Send metadata
     let metadata = StreamMetadata {

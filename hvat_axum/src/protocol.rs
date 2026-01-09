@@ -6,51 +6,16 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Client-to-server message types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum ClientMessage {
-    /// Start streaming an image at a specific pyramid level
-    StartStream { image_id: String, level: u32 },
-
-    /// Cancel the current stream
-    CancelStream,
-
-    /// Change to a different pyramid level mid-stream
-    ChangeLevel { level: u32 },
-
-    /// Save annotations for an image
-    SaveAnnotations {
-        image_id: String,
-        annotations: serde_json::Value,
-        categories: serde_json::Value,
-    },
-
-    /// Load annotations for an image
-    LoadAnnotations { image_id: String },
-
-    /// Request SAM segmentation
-    SamSegment {
-        image_id: String,
-        points: Vec<SamPoint>,
-        #[serde(rename = "box")]
-        box_prompt: Option<[f32; 4]>,
-    },
-
-    /// Pre-compute SAM embedding for an image
-    SamEmbed { image_id: String },
-}
-
-/// Point prompt for SAM segmentation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SamPoint {
-    pub x: f32,
-    pub y: f32,
-    /// 1 = foreground, 0 = background
-    pub label: i32,
-}
+// Re-export shared protocol types from hvat_common
+pub use hvat_common::protocol::{
+    ClientMessage, ErrorCode, PROTOCOL_VERSION, SamPoint, ServerMessageType, Severity,
+};
+pub use hvat_common::{ErrorContext, ProtocolError};
 
 /// Server-to-client JSON response types.
+///
+/// These are sent as JSON text frames for non-streaming data like
+/// annotation responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerResponse {
@@ -76,34 +41,8 @@ pub enum ServerResponse {
     /// SAM embedding is ready
     SamEmbeddingReady { image_id: String },
 
-    /// Error response
+    /// Error response (JSON version, binary version is preferred)
     Error { message: String },
-}
-
-/// Binary message types for image streaming.
-/// These are sent as the first byte of binary WebSocket frames.
-#[repr(u8)]
-pub enum BinaryMessageType {
-    /// Image metadata: [width:u32][height:u32][num_bands:u32][num_layers:u32]
-    Metadata = 0x01,
-
-    /// Layer chunk: [layer:u16][row_start:u32][row_end:u32][rgba_bytes...]
-    LayerChunk = 0x02,
-
-    /// Layer complete: [layer:u16]
-    LayerComplete = 0x03,
-
-    /// Level complete: [level:u8]
-    LevelComplete = 0x04,
-
-    /// Error: [error_len:u16][error_utf8...]
-    Error = 0x05,
-}
-
-impl BinaryMessageType {
-    pub fn to_byte(self) -> u8 {
-        self as u8
-    }
 }
 
 /// Stream metadata sent at the start of streaming.
@@ -116,10 +55,13 @@ pub struct StreamMetadata {
 }
 
 impl StreamMetadata {
-    /// Encode metadata as binary (16 bytes + type byte).
+    /// Encode metadata as binary (protocol v1).
+    ///
+    /// Format: `[version:u8][type:u8][width:u32][height:u32][num_bands:u32][num_layers:u32]`
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(17);
-        buf.push(BinaryMessageType::Metadata.to_byte());
+        let mut buf = Vec::with_capacity(18);
+        buf.push(PROTOCOL_VERSION);
+        buf.push(ServerMessageType::Metadata.to_byte());
         buf.extend_from_slice(&self.width.to_le_bytes());
         buf.extend_from_slice(&self.height.to_le_bytes());
         buf.extend_from_slice(&self.num_bands.to_le_bytes());
@@ -128,10 +70,18 @@ impl StreamMetadata {
     }
 }
 
+/// Encode a Reset message.
+///
+/// This signals the client to clear the current display before a new image loads.
+pub fn encode_reset() -> Vec<u8> {
+    vec![PROTOCOL_VERSION, ServerMessageType::Reset.to_byte()]
+}
+
 /// Encode a layer chunk message.
 pub fn encode_layer_chunk(layer: u16, row_start: u32, row_end: u32, rgba_data: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(11 + rgba_data.len());
-    buf.push(BinaryMessageType::LayerChunk.to_byte());
+    let mut buf = Vec::with_capacity(12 + rgba_data.len());
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::LayerChunk.to_byte());
     buf.extend_from_slice(&layer.to_le_bytes());
     buf.extend_from_slice(&row_start.to_le_bytes());
     buf.extend_from_slice(&row_end.to_le_bytes());
@@ -141,24 +91,101 @@ pub fn encode_layer_chunk(layer: u16, row_start: u32, row_end: u32, rgba_data: &
 
 /// Encode a layer complete message.
 pub fn encode_layer_complete(layer: u16) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(3);
-    buf.push(BinaryMessageType::LayerComplete.to_byte());
+    let mut buf = Vec::with_capacity(4);
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::LayerComplete.to_byte());
     buf.extend_from_slice(&layer.to_le_bytes());
     buf
 }
 
 /// Encode a level complete message.
 pub fn encode_level_complete(level: u8) -> Vec<u8> {
-    vec![BinaryMessageType::LevelComplete.to_byte(), level]
+    vec![
+        PROTOCOL_VERSION,
+        ServerMessageType::LevelComplete.to_byte(),
+        level,
+    ]
 }
 
-/// Encode an error message.
-pub fn encode_error(message: &str) -> Vec<u8> {
-    let bytes = message.as_bytes();
-    let len = bytes.len().min(u16::MAX as usize) as u16;
-    let mut buf = Vec::with_capacity(3 + len as usize);
-    buf.push(BinaryMessageType::Error.to_byte());
-    buf.extend_from_slice(&len.to_le_bytes());
-    buf.extend_from_slice(&bytes[..len as usize]);
-    buf
+/// Encode an all complete message (all levels sent).
+pub fn encode_all_complete() -> Vec<u8> {
+    vec![PROTOCOL_VERSION, ServerMessageType::AllComplete.to_byte()]
+}
+
+/// Encode an error message using the new protocol.
+///
+/// This is a convenience wrapper around `ProtocolError::encode()`.
+pub fn encode_error(error: &ProtocolError) -> Vec<u8> {
+    error.encode(PROTOCOL_VERSION)
+}
+
+/// Encode a simple error message from a string.
+///
+/// Creates a non-retryable error with the given code and message.
+pub fn encode_simple_error(code: ErrorCode, message: &str) -> Vec<u8> {
+    ProtocolError::error(code, message).encode(PROTOCOL_VERSION)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reset_encoding() {
+        let reset = encode_reset();
+        assert_eq!(reset.len(), 2);
+        assert_eq!(reset[0], PROTOCOL_VERSION);
+        assert_eq!(reset[1], ServerMessageType::Reset.to_byte());
+    }
+
+    #[test]
+    fn test_metadata_encoding() {
+        let meta = StreamMetadata {
+            width: 1024,
+            height: 768,
+            num_bands: 10,
+            num_layers: 3,
+        };
+        let bytes = meta.to_bytes();
+
+        assert_eq!(bytes.len(), 18);
+        assert_eq!(bytes[0], PROTOCOL_VERSION);
+        assert_eq!(bytes[1], ServerMessageType::Metadata.to_byte());
+
+        // Verify width
+        assert_eq!(
+            u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]),
+            1024
+        );
+        // Verify height
+        assert_eq!(
+            u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]),
+            768
+        );
+    }
+
+    #[test]
+    fn test_layer_chunk_encoding() {
+        let data = vec![255u8, 128, 64, 32];
+        let chunk = encode_layer_chunk(0, 0, 10, &data);
+
+        assert_eq!(chunk[0], PROTOCOL_VERSION);
+        assert_eq!(chunk[1], ServerMessageType::LayerChunk.to_byte());
+
+        // Verify layer index
+        assert_eq!(u16::from_le_bytes([chunk[2], chunk[3]]), 0);
+
+        // Verify data
+        assert_eq!(&chunk[12..], &data[..]);
+    }
+
+    #[test]
+    fn test_error_encoding() {
+        let error =
+            ProtocolError::retryable(ErrorCode::PyramidNotReady, "Pyramid is building", 5000);
+
+        let encoded = encode_error(&error);
+        assert_eq!(encoded[0], PROTOCOL_VERSION);
+        assert_eq!(encoded[1], ServerMessageType::Error.to_byte());
+    }
 }

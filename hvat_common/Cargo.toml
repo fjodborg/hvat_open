@@ -7,7 +7,9 @@ authors = ["fjodborg <github.com/fjodborg>"]
 description = "Shared utilities for HVAT crates - RGBA packing, band data handling"
 
 [dependencies]
-# No dependencies - pure Rust only
+# Serialization for protocol types
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
