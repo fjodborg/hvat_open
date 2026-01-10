@@ -165,18 +165,31 @@ async fn test_websocket_streams_after_start_message() {
                     continue;
                 }
 
-                let msg_type = data[0];
+                // Protocol v1: [version][msg_type][payload...]
+                let version = data[0];
+                let msg_type = data[1];
+
+                assert_eq!(version, 1, "Expected protocol version 1");
+
                 match msg_type {
+                    0x00 => {
+                        // Reset message - clear display before metadata
+                        println!("Received Reset message");
+                    }
                     0x01 => {
                         // Metadata
                         received_metadata = true;
-                        assert!(data.len() >= 17, "Metadata should be at least 17 bytes");
+                        assert!(
+                            data.len() >= 18,
+                            "Metadata should be at least 18 bytes (version + type + 16 payload)"
+                        );
 
-                        let width = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
-                        let height = u32::from_le_bytes([data[5], data[6], data[7], data[8]]);
-                        let num_bands = u32::from_le_bytes([data[9], data[10], data[11], data[12]]);
+                        let width = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
+                        let height = u32::from_le_bytes([data[6], data[7], data[8], data[9]]);
+                        let num_bands =
+                            u32::from_le_bytes([data[10], data[11], data[12], data[13]]);
                         let num_layers =
-                            u32::from_le_bytes([data[13], data[14], data[15], data[16]]);
+                            u32::from_le_bytes([data[14], data[15], data[16], data[17]]);
 
                         println!(
                             "Received metadata: {}x{}, {} bands, {} layers",
@@ -200,11 +213,19 @@ async fn test_websocket_streams_after_start_message() {
                         println!("Level complete - streaming finished");
                         break;
                     }
-                    0x05 => {
-                        // Error
-                        let len = u16::from_le_bytes([data[1], data[2]]) as usize;
-                        let error_msg = String::from_utf8_lossy(&data[3..3 + len]);
-                        panic!("Server error: {}", error_msg);
+                    0xFE => {
+                        // Error (new protocol uses 0xFE instead of 0x05)
+                        // Parse ProtocolError binary format
+                        if data.len() >= 4 {
+                            let error_code = u16::from_le_bytes([data[2], data[3]]);
+                            // Try to extract message if present
+                            let error_msg = if data.len() > 10 {
+                                String::from_utf8_lossy(&data[10..]).to_string()
+                            } else {
+                                format!("Error code: {}", error_code)
+                            };
+                            panic!("Server error: {}", error_msg);
+                        }
                     }
                     _ => {
                         println!("Unknown message type: {}", msg_type);
@@ -468,13 +489,21 @@ async fn test_sam_segment_e2e_with_real_models() {
                 }
             }
             Ok(Some(Ok(Message::Binary(data)))) => {
-                if !data.is_empty() && data[0] == 0x05 {
-                    let len = u16::from_le_bytes([data[1], data[2]]) as usize;
-                    error_message =
-                        String::from_utf8_lossy(&data[3..3 + len.min(data.len() - 3)]).to_string();
-                    got_error = true;
-                    println!("Got binary error: {}", error_message);
-                    break;
+                // Protocol v1: [version][msg_type][payload...]
+                if data.len() >= 2 {
+                    let version = data[0];
+                    let msg_type = data[1];
+
+                    if version == 1 && msg_type == 0xFE {
+                        // Error message type
+                        if data.len() >= 4 {
+                            let error_code = u16::from_le_bytes([data[2], data[3]]);
+                            error_message = format!("Error code: {}", error_code);
+                            got_error = true;
+                            println!("Got binary error: {}", error_message);
+                            break;
+                        }
+                    }
                 }
             }
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
@@ -571,13 +600,24 @@ async fn test_sam_segment_without_sam_enabled_returns_error() {
             }
             Ok(Some(Ok(Message::Binary(data)))) => {
                 // Binary message - could be an error
-                if !data.is_empty() && data[0] == 0x05 {
-                    // Error message type
-                    let len = u16::from_le_bytes([data[1], data[2]]) as usize;
-                    let error_msg = String::from_utf8_lossy(&data[3..3 + len.min(data.len() - 3)]);
-                    println!("Got binary error: {}", error_msg);
-                    received_error = true;
-                    break;
+                // Protocol v1: [version][msg_type][payload...]
+                if data.len() >= 2 {
+                    let version = data[0];
+                    let msg_type = data[1];
+
+                    if version == 1 && msg_type == 0xFE {
+                        // Error message type (0xFE in new protocol)
+                        if data.len() >= 4 {
+                            let error_code = u16::from_le_bytes([data[2], data[3]]);
+                            println!("Got binary error with code: {}", error_code);
+                            // Error code 3000 = SamNotEnabled
+                            if error_code == 3000 {
+                                println!("Got expected SamNotEnabled error");
+                            }
+                            received_error = true;
+                            break;
+                        }
+                    }
                 }
             }
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
