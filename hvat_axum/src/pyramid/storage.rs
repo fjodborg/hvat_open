@@ -41,6 +41,17 @@ pub trait PyramidStorage: Send + Sync {
     /// Mark a pyramid as building (in progress).
     async fn mark_building(&self, image_hash: &str) -> Result<()>;
 
+    /// Update build progress (0.0 to 1.0) and optional ETA.
+    async fn update_progress(
+        &self,
+        image_hash: &str,
+        progress: f32,
+        eta_seconds: Option<u32>,
+    ) -> Result<()>;
+
+    /// Get build progress for a pyramid that's currently building.
+    async fn get_progress(&self, image_hash: &str) -> Option<(f32, Option<u32>)>;
+
     /// Mark a pyramid as failed.
     async fn mark_failed(&self, image_hash: &str, error: &str) -> Result<()>;
 
@@ -238,7 +249,46 @@ impl PyramidStorage for FilesystemStorage {
         self.ensure_dir(image_hash)?;
         let path = self.status_path(image_hash);
         tokio::fs::write(&path, "building").await?;
+
+        // Initialize progress file
+        let progress_path = self.pyramid_dir(image_hash).join("progress.json");
+        let progress_data = serde_json::json!({
+            "progress": 0.0,
+            "eta_seconds": null
+        });
+        tokio::fs::write(&progress_path, progress_data.to_string()).await?;
+
         Ok(())
+    }
+
+    async fn update_progress(
+        &self,
+        image_hash: &str,
+        progress: f32,
+        eta_seconds: Option<u32>,
+    ) -> Result<()> {
+        self.ensure_dir(image_hash)?;
+        let progress_path = self.pyramid_dir(image_hash).join("progress.json");
+
+        let progress_data = serde_json::json!({
+            "progress": progress,
+            "eta_seconds": eta_seconds
+        });
+
+        tokio::fs::write(&progress_path, progress_data.to_string()).await?;
+        Ok(())
+    }
+
+    async fn get_progress(&self, image_hash: &str) -> Option<(f32, Option<u32>)> {
+        let progress_path = self.pyramid_dir(image_hash).join("progress.json");
+
+        let data = tokio::fs::read_to_string(&progress_path).await.ok()?;
+        let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+
+        let progress = json.get("progress")?.as_f64()? as f32;
+        let eta_seconds = json.get("eta_seconds")?.as_u64().map(|v| v as u32);
+
+        Some((progress, eta_seconds))
     }
 
     async fn mark_failed(&self, image_hash: &str, error: &str) -> Result<()> {

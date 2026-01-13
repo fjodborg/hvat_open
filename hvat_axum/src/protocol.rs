@@ -48,24 +48,32 @@ pub enum ServerResponse {
 /// Stream metadata sent at the start of streaming.
 #[derive(Debug, Clone)]
 pub struct StreamMetadata {
+    /// Width of this level's texture data
     pub width: u32,
+    /// Height of this level's texture data
     pub height: u32,
     pub num_bands: u32,
     pub num_layers: u32,
+    /// Full resolution width (for progressive loading - canvas should use this)
+    pub full_width: u32,
+    /// Full resolution height (for progressive loading - canvas should use this)
+    pub full_height: u32,
 }
 
 impl StreamMetadata {
     /// Encode metadata as binary (protocol v1).
     ///
-    /// Format: `[version:u8][type:u8][width:u32][height:u32][num_bands:u32][num_layers:u32]`
+    /// Format: `[version:u8][type:u8][width:u32][height:u32][num_bands:u32][num_layers:u32][full_width:u32][full_height:u32]`
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(18);
+        let mut buf = Vec::with_capacity(26);
         buf.push(PROTOCOL_VERSION);
         buf.push(ServerMessageType::Metadata.to_byte());
         buf.extend_from_slice(&self.width.to_le_bytes());
         buf.extend_from_slice(&self.height.to_le_bytes());
         buf.extend_from_slice(&self.num_bands.to_le_bytes());
         buf.extend_from_slice(&self.num_layers.to_le_bytes());
+        buf.extend_from_slice(&self.full_width.to_le_bytes());
+        buf.extend_from_slice(&self.full_height.to_le_bytes());
         buf
     }
 }
@@ -145,10 +153,12 @@ mod tests {
             height: 768,
             num_bands: 10,
             num_layers: 3,
+            full_width: 2048,
+            full_height: 1536,
         };
         let bytes = meta.to_bytes();
 
-        assert_eq!(bytes.len(), 18);
+        assert_eq!(bytes.len(), 26);
         assert_eq!(bytes[0], PROTOCOL_VERSION);
         assert_eq!(bytes[1], ServerMessageType::Metadata.to_byte());
 

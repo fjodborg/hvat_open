@@ -58,9 +58,25 @@ impl PyramidBuilder {
 
         // Generate all pyramid levels
         let levels = self.generate_levels(bands);
+        let total_levels = levels.len();
 
-        // Save each level
-        for level in &levels {
+        // Save each level with progress tracking
+        for (idx, level) in levels.iter().enumerate() {
+            // Update progress before saving each level
+            let progress = (idx as f32) / (total_levels as f32);
+            let eta_seconds = if idx > 0 {
+                // Rough estimate: assume each level takes similar time
+                let avg_time_per_level = 2; // seconds, rough estimate
+                Some(((total_levels - idx) * avg_time_per_level) as u32)
+            } else {
+                None
+            };
+
+            self.storage
+                .update_progress(image_hash, progress, eta_seconds)
+                .await
+                .ok(); // Ignore errors in progress updates
+
             self.storage
                 .save_level(image_hash, level.level, &level.layers)
                 .await?;

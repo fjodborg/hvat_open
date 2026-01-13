@@ -88,14 +88,89 @@ async fn handle_client_message(
         ClientMessage::StartStream { level, progressive } => {
             // image_id comes from the WebSocket URL path
             if progressive {
-                // TODO: Implement progressive loading (multiple levels)
                 tracing::info!(
-                    "Progressive loading requested for {}, starting at level {}",
+                    "Progressive loading requested for {}, target level {}",
                     image_id,
                     level
                 );
+
+                // Stream progressively from highest level (thumbnail) down to target level
+                let image_path = find_image(&state, image_id)?;
+                let image_hash = compute_image_hash(&image_path)?;
+
+                // Check pyramid status to determine max level and full dimensions
+                let pyramid_status = state.pyramid_storage.get_status(&image_hash).await;
+
+                let (max_level, full_width, full_height) = if pyramid_status == PyramidStatus::Ready
+                {
+                    // Use cached pyramid metadata
+                    let metadata = state.pyramid_storage.load_metadata(&image_hash).await?;
+                    (
+                        metadata.levels.len().saturating_sub(1) as u32,
+                        metadata.full_width,
+                        metadata.full_height,
+                    )
+                } else {
+                    // Calculate max level from image dimensions
+                    let loader = state
+                        .loaders
+                        .find_loader(&image_path)
+                        .ok_or_else(|| Error::UnsupportedFormat(image_id.to_string()))?;
+                    let metadata = loader.load_metadata(&image_path).await?;
+                    (
+                        crate::pyramid::calculate_num_levels(metadata.width, metadata.height)
+                            .saturating_sub(1),
+                        metadata.width,
+                        metadata.height,
+                    )
+                };
+
+                let target_level = level.min(max_level);
+
+                // Stream from highest (smallest/thumbnail) to target (largest/full-res)
+                // Higher level number = smaller image
+                for (idx, current_level) in (target_level..=max_level).rev().enumerate() {
+                    tracing::info!(
+                        "Streaming progressive level {}/{} for {} (full: {}x{})",
+                        current_level,
+                        max_level,
+                        image_id,
+                        full_width,
+                        full_height
+                    );
+                    // Only send Reset before first level
+                    let send_reset = idx == 0;
+                    stream_image(
+                        state.clone(),
+                        image_id,
+                        current_level,
+                        full_width,
+                        full_height,
+                        tx.clone(),
+                        send_reset,
+                    )
+                    .await?;
+                }
+            } else {
+                // Non-progressive: just stream the requested level
+                // Get full dimensions for metadata
+                let image_path = find_image(&state, image_id)?;
+                let loader = state
+                    .loaders
+                    .find_loader(&image_path)
+                    .ok_or_else(|| Error::UnsupportedFormat(image_id.to_string()))?;
+                let metadata = loader.load_metadata(&image_path).await?;
+                stream_image(
+                    state.clone(),
+                    image_id,
+                    level,
+                    metadata.width,
+                    metadata.height,
+                    tx,
+                    true,
+                )
+                .await?;
             }
-            stream_image(state.clone(), image_id, level, tx).await?;
         }
 
         ClientMessage::Cancel => {
@@ -121,11 +196,19 @@ async fn handle_client_message(
 }
 
 /// Stream an image at a specific pyramid level.
+///
+/// # Arguments
+/// * `send_reset` - If true, sends Reset message before streaming (should be true for first level only)
+/// * `full_width` - Full resolution width (for progressive loading metadata)
+/// * `full_height` - Full resolution height (for progressive loading metadata)
 async fn stream_image(
     state: Arc<AppState>,
     image_id: &str,
     level: u32,
+    full_width: u32,
+    full_height: u32,
     tx: mpsc::Sender<Message>,
+    send_reset: bool,
 ) -> Result<(), Error> {
     // Find the image file
     let image_path = find_image(&state, image_id)?;
@@ -139,24 +222,29 @@ async fn stream_image(
     match pyramid_status {
         PyramidStatus::Ready => {
             // Stream from cached pyramid
-            stream_from_pyramid(&state, &image_hash, level, tx).await
+            stream_from_pyramid(&state, &image_hash, level, tx, send_reset).await
         }
-        PyramidStatus::Building => {
-            // Pyramid is being built, stream directly from source for now
-            tracing::info!("Pyramid {} is building, streaming from source", image_hash);
-            stream_from_source(&state, &image_path, image_id, level, tx).await
-        }
-        PyramidStatus::Pending | PyramidStatus::Failed => {
-            // Check if a task is already running for this hash
-            if state.pyramid_tasks.read().await.contains_key(&image_hash) {
-                tracing::debug!("Pyramid task already running for {}", image_hash);
-            } else {
-                // Start building pyramid in background
-                spawn_pyramid_task(state.clone(), &image_path, &image_hash).await;
+        _ => {
+            // Not cached - stream from source and maybe start building pyramid
+            if pyramid_status == PyramidStatus::Pending || pyramid_status == PyramidStatus::Failed {
+                // Start building pyramid in background (if not already)
+                if !state.pyramid_tasks.read().await.contains_key(&image_hash) {
+                    spawn_pyramid_task(state.clone(), &image_path, &image_hash).await;
+                }
             }
 
-            // Stream directly from source while pyramid is being built
-            stream_from_source(&state, &image_path, image_id, level, tx).await
+            // Stream directly from source
+            stream_from_source(
+                &state,
+                &image_path,
+                image_id,
+                level,
+                full_width,
+                full_height,
+                tx,
+                send_reset,
+            )
+            .await
         }
     }
 }
@@ -167,6 +255,7 @@ async fn stream_from_pyramid(
     image_hash: &str,
     level: u32,
     tx: mpsc::Sender<Message>,
+    send_reset: bool,
 ) -> Result<(), Error> {
     // Load pyramid metadata
     let metadata = state.pyramid_storage.load_metadata(image_hash).await?;
@@ -177,17 +266,21 @@ async fn stream_from_pyramid(
 
     let level_info = &metadata.levels[level as usize];
 
-    // Send Reset message to clear display before new image
-    tx.send(Message::Binary(encode_reset().into()))
-        .await
-        .map_err(|_| Error::Internal("Failed to send reset".to_string()))?;
+    // Send Reset message to clear display before new image (only for first level in progressive mode)
+    if send_reset {
+        tx.send(Message::Binary(encode_reset().into()))
+            .await
+            .map_err(|_| Error::Internal("Failed to send reset".to_string()))?;
+    }
 
-    // Send stream metadata
+    // Send stream metadata with full-res dimensions for progressive loading
     let stream_meta = StreamMetadata {
         width: level_info.width,
         height: level_info.height,
         num_bands: metadata.num_bands as u32,
         num_layers: level_info.num_layers,
+        full_width: metadata.full_width,
+        full_height: metadata.full_height,
     };
     tx.send(Message::Binary(stream_meta.to_bytes().into()))
         .await
@@ -232,12 +325,19 @@ async fn stream_from_pyramid(
 }
 
 /// Stream directly from source file (no pyramid cache).
+///
+/// # Arguments
+/// * `full_width` - Full resolution width (for progressive loading metadata)
+/// * `full_height` - Full resolution height (for progressive loading metadata)
 async fn stream_from_source(
     state: &AppState,
     image_path: &std::path::Path,
     image_id: &str,
     level: u32,
+    full_width: u32,
+    full_height: u32,
     tx: mpsc::Sender<Message>,
+    send_reset: bool,
 ) -> Result<(), Error> {
     // Find a loader
     let loader = state
@@ -258,17 +358,21 @@ async fn stream_from_source(
         bands
     };
 
-    // Send Reset message to clear display before new image
-    tx.send(Message::Binary(encode_reset().into()))
-        .await
-        .map_err(|_| Error::Internal("Failed to send reset".to_string()))?;
+    // Send Reset message to clear display before new image (only for first level in progressive mode)
+    if send_reset {
+        tx.send(Message::Binary(encode_reset().into()))
+            .await
+            .map_err(|_| Error::Internal("Failed to send reset".to_string()))?;
+    }
 
-    // Send metadata
+    // Send metadata with full-res dimensions for progressive loading
     let metadata = StreamMetadata {
         width: bands.width,
         height: bands.height,
         num_bands: bands.num_bands() as u32,
         num_layers: bands.num_layers(),
+        full_width,
+        full_height,
     };
     tx.send(Message::Binary(metadata.to_bytes().into()))
         .await

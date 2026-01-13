@@ -549,6 +549,293 @@ async fn test_sam_segment_e2e_with_real_models() {
     );
 }
 
+/// Test that progressive streaming sends multiple levels in correct order.
+///
+/// This test verifies that:
+/// 1. Progressive mode sends levels from highest (thumbnail) to lowest (full-res)
+/// 2. Each level has Metadata with correct dimensions
+/// 3. Only one Reset is sent (before first level)
+/// 4. LevelComplete is sent for each level with correct level number
+/// 5. Total bytes received per level matches expected (width * height * 4 * num_layers)
+#[tokio::test]
+async fn test_progressive_streaming_sends_multiple_levels() {
+    // Create a larger test image that will have multiple pyramid levels
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let cache_dir = TempDir::new().expect("Failed to create cache dir");
+
+    // Create a 1024x1024 image to generate multiple pyramid levels
+    // MIN_THUMBNAIL_SIZE is 256, so we need:
+    // Level 0: 1024x1024 (full resolution)
+    // Level 1: 512x512
+    // Level 2: 256x256 (thumbnail - stops here)
+    // Progressive should send: Level 2 -> Level 1 -> Level 0
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(1024, 1024, |x, y| {
+        // Gradient so we can verify downsampling
+        Rgb([(x % 256) as u8, (y % 256) as u8, 128u8])
+    });
+
+    let test_image_name = "pyramid_test.png";
+    let test_image_path = temp_dir.path().join(test_image_name);
+    let mut bytes: Vec<u8> = Vec::new();
+    img.write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .expect("Failed to encode PNG");
+    std::fs::write(&test_image_path, bytes).expect("Failed to write test image");
+
+    let config = ServerConfig {
+        port: 0,
+        data_dir: temp_dir.path().to_path_buf(),
+        cache_dir: cache_dir.path().to_path_buf(),
+        max_cache_memory: 100 * 1024 * 1024,
+        max_user_memory: 50 * 1024 * 1024,
+        max_user_streams: 4,
+        stream_chunk_rows: 128,
+        project_name: "test_project".to_string(),
+        sam_enabled: false,
+        sam_model_dir: PathBuf::from("./.cache/models"),
+        sam_variant: SamVariant::Tiny,
+        sam_provider: ExecutionProvider::Cpu,
+        sam_cache_size: 10,
+    };
+
+    let state = Arc::new(AppState::new(config));
+
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
+
+    let app = axum::Router::new()
+        .nest("/api", routes::api_router())
+        .layer(cors)
+        .with_state(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Connect to WebSocket
+    let image_id = "pyramid_test_png";
+    let ws_url = format!("ws://{}/api/images/{}/stream", addr, image_id);
+
+    let (mut ws_stream, _) = connect_async(&ws_url)
+        .await
+        .expect("Failed to connect to WebSocket");
+
+    // Send StartStream with progressive=true
+    // This should work directly from source without needing a cached pyramid
+    let start_msg = serde_json::json!({
+        "action": "start_stream",
+        "level": 0,
+        "progressive": true
+    });
+
+    ws_stream
+        .send(Message::Text(start_msg.to_string().into()))
+        .await
+        .expect("Failed to send StartStream message");
+
+    // Track what we receive
+    let mut reset_count = 0;
+    let mut levels_received: Vec<LevelData> = Vec::new();
+    let mut current_level_data = LevelData::default();
+
+    #[derive(Default, Debug)]
+    struct LevelData {
+        width: u32,
+        height: u32,
+        num_layers: u32,
+        level_number: Option<u8>,
+        total_bytes: usize,
+    }
+
+    let timeout_duration = tokio::time::Duration::from_secs(30);
+    let start_time = std::time::Instant::now();
+
+    while start_time.elapsed() < timeout_duration {
+        let msg =
+            tokio::time::timeout(tokio::time::Duration::from_millis(2000), ws_stream.next()).await;
+
+        match msg {
+            Ok(Some(Ok(Message::Binary(data)))) => {
+                if data.len() < 2 {
+                    continue;
+                }
+
+                let version = data[0];
+                let msg_type = data[1];
+
+                assert_eq!(version, 1, "Expected protocol version 1");
+
+                match msg_type {
+                    0x00 => {
+                        // Reset
+                        reset_count += 1;
+                        println!("Received Reset #{}", reset_count);
+                    }
+                    0x01 => {
+                        // Metadata - start of a new level
+                        if data.len() >= 18 {
+                            current_level_data = LevelData {
+                                width: u32::from_le_bytes([data[2], data[3], data[4], data[5]]),
+                                height: u32::from_le_bytes([data[6], data[7], data[8], data[9]]),
+                                num_layers: u32::from_le_bytes([
+                                    data[14], data[15], data[16], data[17],
+                                ]),
+                                level_number: None,
+                                total_bytes: 0,
+                            };
+                            println!(
+                                "Received Metadata: {}x{}, {} layers",
+                                current_level_data.width,
+                                current_level_data.height,
+                                current_level_data.num_layers
+                            );
+                        }
+                    }
+                    0x02 => {
+                        // LayerChunk - accumulate bytes
+                        if data.len() > 12 {
+                            let chunk_data_len = data.len() - 12; // header is 12 bytes
+                            current_level_data.total_bytes += chunk_data_len;
+                        }
+                    }
+                    0x03 => {
+                        // LayerComplete - just log
+                        if data.len() >= 4 {
+                            let layer = u16::from_le_bytes([data[2], data[3]]);
+                            println!("Layer {} complete", layer);
+                        }
+                    }
+                    0x04 => {
+                        // LevelComplete - save this level's data
+                        if !data.is_empty() && data.len() >= 3 {
+                            current_level_data.level_number = Some(data[2]);
+                            println!(
+                                "Level {} complete: {}x{}, {} bytes received",
+                                data[2],
+                                current_level_data.width,
+                                current_level_data.height,
+                                current_level_data.total_bytes
+                            );
+                            levels_received.push(std::mem::take(&mut current_level_data));
+
+                            // If we got level 0 (full resolution), we're done
+                            if data[2] == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    0xFE => {
+                        // Error
+                        if data.len() >= 4 {
+                            let error_code = u16::from_le_bytes([data[2], data[3]]);
+                            panic!("Received error: code {}", error_code);
+                        }
+                    }
+                    _ => {
+                        println!("Unknown message type: 0x{:02x}", msg_type);
+                    }
+                }
+            }
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                println!("Connection closed");
+                break;
+            }
+            Ok(Some(Err(e))) => {
+                panic!("WebSocket error: {}", e);
+            }
+            Err(_) => {
+                // Timeout
+                if !levels_received.is_empty()
+                    && levels_received.last().map(|l| l.level_number) == Some(Some(0))
+                {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let _ = ws_stream.close(None).await;
+
+    // Assertions
+    assert_eq!(reset_count, 1, "Should receive exactly one Reset message");
+
+    assert!(
+        !levels_received.is_empty(),
+        "Should receive at least one level"
+    );
+
+    println!("\n=== Progressive Streaming Test Results ===");
+    println!("Reset messages: {}", reset_count);
+    println!("Levels received: {}", levels_received.len());
+
+    for (i, level) in levels_received.iter().enumerate() {
+        let expected_bytes = (level.width * level.height * 4 * level.num_layers) as usize;
+        println!(
+            "  Level {} (idx {}): {}x{}, {} layers, {} bytes (expected: {})",
+            level.level_number.unwrap_or(255),
+            i,
+            level.width,
+            level.height,
+            level.num_layers,
+            level.total_bytes,
+            expected_bytes
+        );
+
+        // Verify bytes match expected
+        assert_eq!(
+            level.total_bytes,
+            expected_bytes,
+            "Level {} byte count mismatch",
+            level.level_number.unwrap_or(255)
+        );
+    }
+
+    // Verify levels are in descending order (highest/smallest first, then progressively larger)
+    // Level numbers should be: highest (e.g., 2) -> 1 -> 0
+    let level_numbers: Vec<u8> = levels_received
+        .iter()
+        .filter_map(|l| l.level_number)
+        .collect();
+    println!("Level order: {:?}", level_numbers);
+
+    // Verify descending order
+    for i in 1..level_numbers.len() {
+        assert!(
+            level_numbers[i] < level_numbers[i - 1],
+            "Levels should be in descending order: got {:?}",
+            level_numbers
+        );
+    }
+
+    // Verify we ended at level 0
+    assert_eq!(
+        level_numbers.last(),
+        Some(&0),
+        "Final level should be 0 (full resolution)"
+    );
+
+    // Verify dimensions increase with each level (smaller level number = larger dimensions)
+    for i in 1..levels_received.len() {
+        assert!(
+            levels_received[i].width >= levels_received[i - 1].width,
+            "Width should increase as level number decreases"
+        );
+        assert!(
+            levels_received[i].height >= levels_received[i - 1].height,
+            "Height should increase as level number decreases"
+        );
+    }
+
+    println!("\nProgressive streaming test PASSED!");
+}
+
 #[tokio::test]
 async fn test_sam_segment_without_sam_enabled_returns_error() {
     // Test that SAM segment request returns an error when SAM is not enabled
