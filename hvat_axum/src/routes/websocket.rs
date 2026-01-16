@@ -129,12 +129,21 @@ async fn handle_client_message(
 
                 // Stream from highest (smallest/thumbnail) to target (largest/full-res)
                 // Higher level number = smaller image
+                tracing::info!(
+                    "Starting progressive stream for {}: levels {} down to {} (full: {}x{})",
+                    image_id,
+                    max_level,
+                    target_level,
+                    full_width,
+                    full_height
+                );
                 for (idx, current_level) in (target_level..=max_level).rev().enumerate() {
                     tracing::info!(
-                        "Streaming progressive level {}/{} for {} (full: {}x{})",
+                        "Streaming progressive level {}/{} for {} (idx={}, full: {}x{})",
                         current_level,
                         max_level,
                         image_id,
+                        idx,
                         full_width,
                         full_height
                     );
@@ -150,7 +159,13 @@ async fn handle_client_message(
                         send_reset,
                     )
                     .await?;
+                    tracing::info!(
+                        "Completed streaming level {} for {}",
+                        current_level,
+                        image_id
+                    );
                 }
+                tracing::info!("Progressive stream complete for {}", image_id);
             } else {
                 // Non-progressive: just stream the requested level
                 // Get full dimensions for metadata
