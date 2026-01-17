@@ -26,8 +26,6 @@ pub struct OnnxSamEngine {
     encoder: Arc<Mutex<Session>>,
     decoder: Arc<Mutex<Session>>,
     provider: ExecutionProvider,
-    #[allow(dead_code)]
-    variant: SamVariant,
 }
 
 impl OnnxSamEngine {
@@ -59,7 +57,6 @@ impl OnnxSamEngine {
             encoder: Arc::new(Mutex::new(encoder)),
             decoder: Arc::new(Mutex::new(decoder)),
             provider,
-            variant,
         })
     }
 

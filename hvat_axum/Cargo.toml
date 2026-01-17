@@ -52,14 +52,10 @@ clap = { version = "4", features = ["derive", "env"] }
 # HTTP client for model download
 reqwest = { version = "0.12", features = ["json"] }
 
-# Platform directories
-dirs = "5"
-
 # Logging
 log = { workspace = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 tempfile = "3"

@@ -8,7 +8,6 @@ resolver = "2"
 leptos = { version = "0.8", features = ["csr"] }
 thaw = "0.4"
 leptos-use = "0.17"
-leptos_hotkeys = "0.2"
 
 # WebGPU
 wgpu = "27"

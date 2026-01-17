@@ -230,7 +230,6 @@ impl ServerConfig {
     }
 
     /// Load configuration from environment variables (legacy method).
-    #[allow(dead_code)]
     pub fn from_env() -> Self {
         // Parse CLI args which also reads env vars via clap
         Self::from_cli(CliArgs::parse())
