@@ -239,8 +239,37 @@ async fn stream_image(
             // Stream from cached pyramid
             stream_from_pyramid(&state, &image_hash, level, tx, send_reset).await
         }
+        PyramidStatus::Building => {
+            // Pyramid is being built - send error with progress so client can show progress bar
+            let (progress, eta_seconds) = state
+                .pyramid_storage
+                .get_progress(&image_hash)
+                .await
+                .unwrap_or((0.0, None));
+
+            let error = ProtocolError::retryable(
+                ErrorCode::PyramidNotReady,
+                format!(
+                    "Image pyramid is being built ({:.0}% complete)",
+                    progress * 100.0
+                ),
+                5000, // Retry after 5 seconds
+            )
+            .with_context(hvat_common::ErrorContext::Pyramid {
+                image_id: image_id.to_string(),
+                progress: Some(progress),
+                eta_seconds,
+            });
+
+            let error_bytes = encode_error(&error);
+            tx.send(Message::Binary(error_bytes.into()))
+                .await
+                .map_err(|_| Error::Internal("Failed to send error".to_string()))?;
+
+            Ok(())
+        }
         _ => {
-            // Not cached - stream from source and maybe start building pyramid
+            // Not cached (Pending or Failed) - stream from source and start building pyramid
             if pyramid_status == PyramidStatus::Pending || pyramid_status == PyramidStatus::Failed {
                 // Start building pyramid in background (if not already)
                 if !state.pyramid_tasks.read().await.contains_key(&image_hash) {
