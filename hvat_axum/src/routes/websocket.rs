@@ -2,6 +2,8 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
@@ -12,9 +14,9 @@ use uuid::Uuid;
 use crate::error::Error;
 use crate::packer::{downsample_bands, pack_bands_to_rgba_layers};
 use crate::protocol::{
-    ClientMessage, ErrorCode, ProtocolError, SamPoint as ProtocolSamPoint, ServerResponse,
-    StreamMetadata, encode_error, encode_layer_chunk, encode_layer_complete, encode_level_complete,
-    encode_reset,
+    ClientMessage, ErrorCode, ProtocolError, SamPoint as ProtocolSamPoint, ServerCapabilities,
+    ServerResponse, StreamMetadata, encode_capabilities, encode_error, encode_layer_chunk,
+    encode_layer_complete, encode_level_complete, encode_ping, encode_reset,
 };
 use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::sam::{CachedEmbedding, EncoderOutput, SamPoint as BackendSamPoint};
@@ -23,58 +25,238 @@ use crate::utils::find_image;
 
 /// Handle a WebSocket connection for image streaming.
 pub async fn handle_websocket(socket: WebSocket, state: Arc<AppState>, image_id: String) {
+    // Try to acquire a connection slot
+    let connection_id = match state.try_acquire_connection() {
+        Some(id) => id,
+        None => {
+            // At connection limit - reject with error
+            let (mut sender, _) = socket.split();
+            let error = ProtocolError::retryable(
+                ErrorCode::MaxConnectionsReached,
+                format!(
+                    "Server at maximum connections ({}). Please try again later.",
+                    state.config.max_connections
+                ),
+                5000,
+            );
+            let _ = sender
+                .send(Message::Binary(encode_error(&error).into()))
+                .await;
+            let _ = sender.close().await;
+            tracing::warn!(
+                "Rejected connection: max connections ({}) reached",
+                state.config.max_connections
+            );
+            return;
+        }
+    };
+
+    tracing::info!(
+        "WebSocket connection {} established for image '{}' (active: {})",
+        connection_id,
+        image_id,
+        state.connection_count()
+    );
+
+    // Run the connection handler with cleanup on exit
+    let result = handle_websocket_inner(socket, state.clone(), image_id, connection_id).await;
+
+    // Always release the connection slot
+    state.release_connection();
+    tracing::info!(
+        "WebSocket connection {} closed (active: {})",
+        connection_id,
+        state.connection_count()
+    );
+
+    if let Err(e) = result {
+        tracing::error!("WebSocket connection {} error: {}", connection_id, e);
+    }
+}
+
+/// Inner WebSocket handler with ping/pong keepalive.
+async fn handle_websocket_inner(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    image_id: String,
+    connection_id: u64,
+) -> Result<(), Error> {
     let (mut sender, mut receiver) = socket.split();
 
     // Channel for sending messages to the client
     let (tx, mut rx) = mpsc::channel::<Message>(32);
 
+    // Shared state for ping/pong tracking
+    let last_pong = Arc::new(AtomicU64::new(current_timestamp_ms()));
+    let connection_alive = Arc::new(AtomicBool::new(true));
+
+    // Build and send server capabilities immediately on connect
+    let capabilities = build_server_capabilities(&state);
+    let capabilities_bytes = encode_capabilities(&capabilities);
+
     // Spawn task to forward messages to WebSocket
+    let connection_alive_send = connection_alive.clone();
     let send_task = tokio::spawn(async move {
+        // Send capabilities as first message
+        if sender
+            .send(Message::Binary(capabilities_bytes.into()))
+            .await
+            .is_err()
+        {
+            connection_alive_send.store(false, Ordering::SeqCst);
+            return;
+        }
+
+        // Forward all other messages
         while let Some(msg) = rx.recv().await {
             if sender.send(msg).await.is_err() {
+                connection_alive_send.store(false, Ordering::SeqCst);
                 break;
             }
         }
     });
 
+    // Spawn ping task if keepalive is enabled
+    let ping_interval = state.config.ping_interval_secs;
+    let connection_timeout = state.config.connection_timeout_secs;
+    let ping_task = if ping_interval > 0 {
+        let tx_ping = tx.clone();
+        let last_pong_ping = last_pong.clone();
+        let connection_alive_ping = connection_alive.clone();
+
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(ping_interval));
+            interval.tick().await; // Skip immediate first tick
+
+            loop {
+                interval.tick().await;
+
+                if !connection_alive_ping.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                // Check if client has timed out (no pong received)
+                let last_pong_time = last_pong_ping.load(Ordering::SeqCst);
+                let now = current_timestamp_ms();
+                let elapsed_secs = (now.saturating_sub(last_pong_time)) / 1000;
+
+                if elapsed_secs > connection_timeout {
+                    tracing::warn!(
+                        "Connection {} timed out: no pong for {} seconds",
+                        connection_id,
+                        elapsed_secs
+                    );
+                    connection_alive_ping.store(false, Ordering::SeqCst);
+                    break;
+                }
+
+                // Send ping
+                let ping_msg = encode_ping(now);
+                if tx_ping
+                    .send(Message::Binary(ping_msg.into()))
+                    .await
+                    .is_err()
+                {
+                    connection_alive_ping.store(false, Ordering::SeqCst);
+                    break;
+                }
+
+                tracing::trace!("Sent ping to connection {}", connection_id);
+            }
+        }))
+    } else {
+        None
+    };
+
     // Process incoming messages
-    while let Some(Ok(msg)) = receiver.next().await {
-        match msg {
-            Message::Text(text) => {
-                tracing::debug!("Received text message: {}", text);
-                // Parse client message
-                match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(client_msg) => {
-                        if let Err(e) =
-                            handle_client_message(client_msg, state.clone(), &image_id, tx.clone())
-                                .await
-                        {
-                            // Send error response
-                            let error =
-                                ProtocolError::error(ErrorCode::InternalError, e.to_string());
-                            let error_bytes = encode_error(&error);
-                            let _ = tx.send(Message::Binary(error_bytes.into())).await;
+    while let Some(result) = receiver.next().await {
+        if !connection_alive.load(Ordering::SeqCst) {
+            break;
+        }
+
+        match result {
+            Ok(msg) => match msg {
+                Message::Text(text) => {
+                    tracing::debug!("Received text message: {}", text);
+                    // Parse client message
+                    match serde_json::from_str::<ClientMessage>(&text) {
+                        Ok(client_msg) => {
+                            // Handle Pong specially - update last_pong timestamp
+                            if let ClientMessage::Pong { timestamp } = &client_msg {
+                                last_pong.store(current_timestamp_ms(), Ordering::SeqCst);
+                                tracing::trace!(
+                                    "Received pong from connection {} (ts: {})",
+                                    connection_id,
+                                    timestamp
+                                );
+                                continue;
+                            }
+
+                            if let Err(e) = handle_client_message(
+                                client_msg,
+                                state.clone(),
+                                &image_id,
+                                tx.clone(),
+                            )
+                            .await
+                            {
+                                // Send error response
+                                let error =
+                                    ProtocolError::error(ErrorCode::InternalError, e.to_string());
+                                let error_bytes = encode_error(&error);
+                                let _ = tx.send(Message::Binary(error_bytes.into())).await;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Invalid client message: {}", e);
-                        let response = ServerResponse::Error {
-                            message: format!("Invalid message: {}", e),
-                        };
-                        if let Ok(json) = serde_json::to_string(&response) {
-                            let _ = tx.send(Message::Text(json.into())).await;
+                        Err(e) => {
+                            tracing::warn!("Invalid client message: {}", e);
+                            let response = ServerResponse::Error {
+                                message: format!("Invalid message: {}", e),
+                            };
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                let _ = tx.send(Message::Text(json.into())).await;
+                            }
                         }
                     }
                 }
+                Message::Close(_) => {
+                    tracing::debug!("Received close frame from connection {}", connection_id);
+                    break;
+                }
+                _ => {} // Ignore binary messages from client
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "WebSocket receive error on connection {}: {}",
+                    connection_id,
+                    e
+                );
+                break;
             }
-            Message::Close(_) => break,
-            _ => {} // Ignore binary messages from client
         }
     }
 
+    // Signal shutdown to other tasks
+    connection_alive.store(false, Ordering::SeqCst);
+
     // Clean up
     drop(tx);
+
+    // Wait for tasks to finish
     let _ = send_task.await;
+    if let Some(ping_task) = ping_task {
+        ping_task.abort();
+    }
+
+    Ok(())
+}
+
+/// Get current timestamp in milliseconds (monotonic).
+fn current_timestamp_ms() -> u64 {
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Handle a parsed client message.
@@ -201,9 +383,8 @@ async fn handle_client_message(
             handle_sam_segment(&state, image_id, points, box_prompt, tx).await?;
         }
 
-        ClientMessage::Pong { timestamp } => {
-            tracing::debug!("Received pong: {}", timestamp);
-            // Could track connection health here
+        ClientMessage::Pong { .. } => {
+            // Pong is handled in the receive loop for accurate timing
         }
     }
 
@@ -301,14 +482,22 @@ async fn stream_from_pyramid(
     tx: mpsc::Sender<Message>,
     send_reset: bool,
 ) -> Result<(), Error> {
+    use hvat_common::PyramidLevel;
+
     // Load pyramid metadata
     let metadata = state.pyramid_storage.load_metadata(image_hash).await?;
 
     // Find the requested level (clamp to available levels)
     let max_level = metadata.levels.len().saturating_sub(1) as u32;
-    let level = level.min(max_level);
+    let level = PyramidLevel::from_u32_clamped(level.min(max_level));
 
-    let level_info = &metadata.levels[level as usize];
+    let level_info = metadata.levels.get(level.as_usize()).ok_or_else(|| {
+        Error::Internal(format!(
+            "Pyramid level {} not found (available: 0-{})",
+            level.as_u8(),
+            metadata.levels.len().saturating_sub(1)
+        ))
+    })?;
 
     // Send Reset message to clear display before new image (only for first level in progressive mode)
     if send_reset {
@@ -331,7 +520,10 @@ async fn stream_from_pyramid(
         .map_err(|_| Error::Internal("Failed to send metadata".to_string()))?;
 
     // Load and stream the level data
-    let layers = state.pyramid_storage.load_level(image_hash, level).await?;
+    let layers = state
+        .pyramid_storage
+        .load_level(image_hash, level.as_u32())
+        .await?;
 
     let chunk_rows = state.config.stream_chunk_rows;
 
@@ -362,7 +554,7 @@ async fn stream_from_pyramid(
         }
     }
 
-    let msg = encode_level_complete(level as u8);
+    let msg = encode_level_complete(level.as_u8());
     let _ = tx.send(Message::Binary(msg.into())).await;
 
     Ok(())
@@ -506,7 +698,7 @@ async fn spawn_pyramid_task(state: Arc<AppState>, image_path: &Path, image_hash:
     let handle = tokio::spawn(async move {
         tracing::info!("Starting pyramid generation for {}", hash);
 
-        let result = if let Some(loader) = loaders.find_loader(&path) {
+        if let Some(loader) = loaders.find_loader(&path) {
             match loader.load_bands(&path).await {
                 Ok(bands) => {
                     if let Err(e) = builder.build_and_save(&hash, &bands).await {
@@ -521,12 +713,10 @@ async fn spawn_pyramid_task(state: Arc<AppState>, image_path: &Path, image_hash:
                     let _ = storage.mark_failed(&hash, &e.to_string()).await;
                 }
             }
-        };
+        }
 
         // Clean up: remove ourselves from the task registry
         state_for_cleanup.pyramid_tasks.write().await.remove(&hash);
-
-        result
     });
 
     // Register the task
@@ -771,4 +961,30 @@ async fn load_image_rgb(
 /// Clamps values outside this range.
 fn normalize_to_u8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0) as u8
+}
+
+// ============================================================================
+// Capabilities
+// ============================================================================
+
+/// Build server capabilities from current configuration.
+///
+/// This is sent to clients on WebSocket connect to inform them about
+/// server features and protocol version.
+fn build_server_capabilities(state: &AppState) -> ServerCapabilities {
+    let mut caps = ServerCapabilities {
+        protocol_version: hvat_common::PROTOCOL_VERSION,
+        max_image_size: state.config.max_cache_memory,
+        max_pyramid_levels: hvat_common::MAX_PYRAMID_LEVEL,
+        sam_enabled: state.sam_engine.is_some(),
+        sam_model: String::new(),
+        max_concurrent_streams: state.config.max_user_streams as u32,
+    };
+
+    // Add SAM model info if enabled
+    if state.sam_engine.is_some() {
+        caps.sam_model = state.config.sam_variant.name().to_string();
+    }
+
+    caps
 }

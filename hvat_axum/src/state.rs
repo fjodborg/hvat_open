@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -39,6 +40,12 @@ pub struct AppState {
 
     /// Cache for SAM image embeddings
     pub embedding_cache: Arc<EmbeddingCache>,
+
+    /// Active WebSocket connection count (atomic for lock-free access)
+    pub active_connections: AtomicU64,
+
+    /// Connection ID counter for generating unique IDs
+    connection_id_counter: AtomicU64,
 }
 
 impl AppState {
@@ -107,7 +114,37 @@ impl AppState {
             pyramid_tasks: RwLock::new(HashMap::new()),
             sam_engine,
             embedding_cache,
+            active_connections: AtomicU64::new(0),
+            connection_id_counter: AtomicU64::new(0),
         }
+    }
+
+    /// Try to acquire a connection slot.
+    ///
+    /// Returns `Some(connection_id)` if under the limit, `None` if at capacity.
+    pub fn try_acquire_connection(&self) -> Option<u64> {
+        let max_connections = self.config.max_connections as u64;
+        let current = self.active_connections.fetch_add(1, Ordering::SeqCst);
+
+        if current >= max_connections {
+            // Over limit, rollback
+            self.active_connections.fetch_sub(1, Ordering::SeqCst);
+            None
+        } else {
+            // Generate unique connection ID
+            let id = self.connection_id_counter.fetch_add(1, Ordering::SeqCst);
+            Some(id)
+        }
+    }
+
+    /// Release a connection slot.
+    pub fn release_connection(&self) {
+        self.active_connections.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Get current active connection count.
+    pub fn connection_count(&self) -> u64 {
+        self.active_connections.load(Ordering::SeqCst)
     }
 }
 

@@ -279,6 +279,114 @@ pub enum ErrorCategory {
     Unknown,
 }
 
+/// Server capabilities sent on WebSocket connect.
+///
+/// This allows clients to discover server features and validate compatibility.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServerCapabilities {
+    /// Protocol version supported by server
+    pub protocol_version: u8,
+
+    /// Maximum image size in bytes the server will accept
+    pub max_image_size: u64,
+
+    /// Maximum pyramid levels supported
+    pub max_pyramid_levels: u8,
+
+    /// Whether SAM (Segment Anything Model) is enabled
+    pub sam_enabled: bool,
+
+    /// SAM model variant (e.g., "tiny", "base-plus"), empty if SAM disabled
+    pub sam_model: String,
+
+    /// Maximum concurrent streams per connection
+    pub max_concurrent_streams: u32,
+}
+
+impl Default for ServerCapabilities {
+    fn default() -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            max_image_size: 4 * 1024 * 1024 * 1024, // 4GB
+            max_pyramid_levels: 8,
+            sam_enabled: false,
+            sam_model: String::new(),
+            max_concurrent_streams: 4,
+        }
+    }
+}
+
+impl ServerCapabilities {
+    /// Create new capabilities with SAM enabled.
+    pub fn with_sam(mut self, model: impl Into<String>) -> Self {
+        self.sam_enabled = true;
+        self.sam_model = model.into();
+        self
+    }
+
+    /// Encode to binary protocol format.
+    ///
+    /// Format:
+    /// ```text
+    /// [version:u8][type:u8][protocol_version:u8][max_image_size:u64]
+    /// [max_pyramid_levels:u8][sam_enabled:u8][max_concurrent_streams:u32]
+    /// [sam_model_len:u16][sam_model:utf8]
+    /// ```
+    pub fn encode(&self) -> Vec<u8> {
+        let model_bytes = self.sam_model.as_bytes();
+        let mut buf = Vec::with_capacity(18 + model_bytes.len());
+
+        buf.push(PROTOCOL_VERSION);
+        buf.push(ServerMessageType::Capabilities.to_byte());
+        buf.push(self.protocol_version);
+        buf.extend_from_slice(&self.max_image_size.to_le_bytes());
+        buf.push(self.max_pyramid_levels);
+        buf.push(self.sam_enabled as u8);
+        buf.extend_from_slice(&self.max_concurrent_streams.to_le_bytes());
+        buf.extend_from_slice(&(model_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(model_bytes);
+
+        buf
+    }
+
+    /// Decode from binary protocol format.
+    ///
+    /// Expects data to start AFTER the version and type bytes.
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        use crate::BinaryReader;
+
+        let mut reader = BinaryReader::new(data);
+
+        let protocol_version = reader.read_u8()?;
+        let max_image_size = reader.read_u64()?;
+        let max_pyramid_levels = reader.read_u8()?;
+        let sam_enabled = reader.read_u8()? != 0;
+        let max_concurrent_streams = reader.read_u32()?;
+        let model_len = reader.read_u16()? as usize;
+        let sam_model = if model_len > 0 {
+            reader.read_str(model_len)?.to_string()
+        } else {
+            String::new()
+        };
+
+        Some(Self {
+            protocol_version,
+            max_image_size,
+            max_pyramid_levels,
+            sam_enabled,
+            sam_model,
+            max_concurrent_streams,
+        })
+    }
+
+    /// Check if client version is compatible with server.
+    pub fn is_compatible(&self, client_version: u8) -> bool {
+        // For now, require exact match. In the future, we might allow
+        // minor version differences.
+        self.protocol_version == client_version
+    }
+}
+
 /// Error severity level.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -348,5 +456,52 @@ mod tests {
         assert!(Severity::Info < Severity::Warning);
         assert!(Severity::Warning < Severity::Error);
         assert!(Severity::Error < Severity::Fatal);
+    }
+
+    #[test]
+    fn test_capabilities_encode_decode() {
+        let caps = ServerCapabilities {
+            protocol_version: 1,
+            max_image_size: 4 * 1024 * 1024 * 1024,
+            max_pyramid_levels: 8,
+            sam_enabled: true,
+            sam_model: "base-plus".to_string(),
+            max_concurrent_streams: 4,
+        };
+
+        let encoded = caps.encode();
+        assert_eq!(encoded[0], PROTOCOL_VERSION);
+        assert_eq!(encoded[1], ServerMessageType::Capabilities.to_byte());
+
+        // Decode (skip version and type bytes)
+        let decoded = ServerCapabilities::decode(&encoded[2..]).unwrap();
+        assert_eq!(decoded, caps);
+    }
+
+    #[test]
+    fn test_capabilities_without_sam() {
+        let caps = ServerCapabilities::default();
+
+        let encoded = caps.encode();
+        let decoded = ServerCapabilities::decode(&encoded[2..]).unwrap();
+
+        assert!(!decoded.sam_enabled);
+        assert!(decoded.sam_model.is_empty());
+    }
+
+    #[test]
+    fn test_capabilities_with_sam_builder() {
+        let caps = ServerCapabilities::default().with_sam("tiny");
+
+        assert!(caps.sam_enabled);
+        assert_eq!(caps.sam_model, "tiny");
+    }
+
+    #[test]
+    fn test_capabilities_compatibility() {
+        let caps = ServerCapabilities::default();
+
+        assert!(caps.is_compatible(PROTOCOL_VERSION));
+        assert!(!caps.is_compatible(PROTOCOL_VERSION + 1));
     }
 }

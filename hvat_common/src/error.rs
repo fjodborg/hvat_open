@@ -125,41 +125,29 @@ impl ProtocolError {
     ///
     /// Expects data to start AFTER the version and type bytes.
     pub fn decode(data: &[u8]) -> Option<Self> {
-        if data.len() < 10 {
-            return None;
-        }
+        use crate::BinaryReader;
 
-        let code = u16::from_le_bytes([data[0], data[1]]);
+        let mut reader = BinaryReader::new(data);
+
+        let code = reader.read_u16()?;
         let code = ErrorCode::from_u16(code)?;
 
-        let severity = Severity::from_byte(data[2])?;
-        let retryable = data[3] != 0;
-        let retry_after_ms = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        let context_len = u16::from_le_bytes([data[8], data[9]]) as usize;
-
-        if data.len() < 12 + context_len {
-            return None;
-        }
-
-        let message_len = u16::from_le_bytes([data[10], data[11]]) as usize;
-
-        if data.len() < 12 + context_len + message_len {
-            return None;
-        }
+        let severity = Severity::from_byte(reader.read_u8()?)?;
+        let retryable = reader.read_u8()? != 0;
+        let retry_after_ms = reader.read_u32()?;
+        let context_len = reader.read_u16()? as usize;
+        let message_len = reader.read_u16()? as usize;
 
         let context = if context_len > 0 {
-            let context_json = std::str::from_utf8(&data[12..12 + context_len]).ok()?;
+            let context_json = reader.read_str(context_len)?;
             serde_json::from_str(context_json).unwrap_or(ErrorContext::None)
         } else {
             ErrorContext::None
         };
 
-        let message = if message_len > 0 {
-            String::from_utf8_lossy(&data[12 + context_len..12 + context_len + message_len])
-                .into_owned()
-        } else {
-            String::new()
-        };
+        let message = reader
+            .read_str_lossy(message_len)
+            .unwrap_or_else(String::new);
 
         Some(Self {
             code,

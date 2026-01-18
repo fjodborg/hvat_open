@@ -37,6 +37,18 @@ pub struct CliArgs {
     #[arg(long, default_value = "4", env = "HVAT_MAX_STREAMS")]
     pub max_streams: usize,
 
+    /// Maximum total WebSocket connections
+    #[arg(long, default_value = "100", env = "HVAT_MAX_CONNECTIONS")]
+    pub max_connections: usize,
+
+    /// WebSocket ping interval in seconds (0 to disable)
+    #[arg(long, default_value = "30", env = "HVAT_PING_INTERVAL")]
+    pub ping_interval: u64,
+
+    /// WebSocket connection timeout in seconds (no pong response)
+    #[arg(long, default_value = "90", env = "HVAT_CONNECTION_TIMEOUT")]
+    pub connection_timeout: u64,
+
     /// Number of rows to send per WebSocket message
     #[arg(long, default_value = "128", env = "HVAT_CHUNK_ROWS")]
     pub chunk_rows: u32,
@@ -89,6 +101,15 @@ pub struct ServerConfig {
     /// Maximum concurrent streams per user
     pub max_user_streams: usize,
 
+    /// Maximum total WebSocket connections
+    pub max_connections: usize,
+
+    /// WebSocket ping interval in seconds (0 to disable keepalive)
+    pub ping_interval_secs: u64,
+
+    /// WebSocket connection timeout in seconds (no pong response)
+    pub connection_timeout_secs: u64,
+
     /// Number of rows to send per WebSocket message
     pub stream_chunk_rows: u32,
 
@@ -121,6 +142,9 @@ impl Default for ServerConfig {
             max_cache_memory: 2 * 1024 * 1024 * 1024, // 2GB
             max_user_memory: 500 * 1024 * 1024,       // 500MB
             max_user_streams: 4,
+            max_connections: 100,
+            ping_interval_secs: 30,
+            connection_timeout_secs: 90,
             stream_chunk_rows: 128,
             project_name: "data".to_string(),
             // SAM defaults
@@ -174,6 +198,9 @@ impl ServerConfig {
             max_cache_memory: args.max_cache_mb * 1024 * 1024,
             max_user_memory: args.max_user_mb * 1024 * 1024,
             max_user_streams: args.max_streams,
+            max_connections: args.max_connections,
+            ping_interval_secs: args.ping_interval,
+            connection_timeout_secs: args.connection_timeout,
             stream_chunk_rows: args.chunk_rows,
             project_name,
             // SAM
