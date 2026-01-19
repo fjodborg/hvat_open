@@ -87,14 +87,16 @@ impl ProtocolError {
         self
     }
 
-    /// Encode to binary protocol format.
+    /// Encode the error payload without the message header.
+    ///
+    /// This is used by the multiplexed protocol where the header is added separately.
     ///
     /// Format:
     /// ```text
-    /// [version:u8][type:u8][code:u16][severity:u8][retryable:u8][retry_after:u32]
+    /// [code:u16][severity:u8][retryable:u8][retry_after:u32]
     /// [context_len:u16][msg_len:u16][context:utf8][message:utf8]
     /// ```
-    pub fn encode(&self, version: u8) -> Vec<u8> {
+    pub fn encode_payload(&self) -> Vec<u8> {
         let context_json = match &self.context {
             ErrorContext::None => String::new(),
             ctx => serde_json::to_string(ctx).unwrap_or_default(),
@@ -103,12 +105,9 @@ impl ProtocolError {
         let context_bytes = context_json.as_bytes();
         let message_bytes = self.message.as_bytes();
 
-        let mut buf = Vec::with_capacity(
-            2 + 2 + 1 + 1 + 4 + 2 + 2 + context_bytes.len() + message_bytes.len(),
-        );
+        let mut buf =
+            Vec::with_capacity(2 + 1 + 1 + 4 + 2 + 2 + context_bytes.len() + message_bytes.len());
 
-        buf.push(version);
-        buf.push(ServerMessageType::Error.to_byte());
         buf.extend_from_slice(&(self.code as u16).to_le_bytes());
         buf.push(self.severity.to_byte());
         buf.push(self.retryable as u8);
@@ -118,6 +117,22 @@ impl ProtocolError {
         buf.extend_from_slice(context_bytes);
         buf.extend_from_slice(message_bytes);
 
+        buf
+    }
+
+    /// Encode to binary protocol format (legacy).
+    ///
+    /// Format:
+    /// ```text
+    /// [version:u8][type:u8][code:u16][severity:u8][retryable:u8][retry_after:u32]
+    /// [context_len:u16][msg_len:u16][context:utf8][message:utf8]
+    /// ```
+    pub fn encode(&self, version: u8) -> Vec<u8> {
+        let payload = self.encode_payload();
+        let mut buf = Vec::with_capacity(2 + payload.len());
+        buf.push(version);
+        buf.push(ServerMessageType::Error.to_byte());
+        buf.extend_from_slice(&payload);
         buf
     }
 

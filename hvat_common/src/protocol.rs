@@ -15,6 +15,17 @@ pub const PROTOCOL_VERSION: u8 = 1;
 /// Binary message types (server → client).
 ///
 /// The first byte of every binary WebSocket message identifies its type.
+///
+/// # Protocol Versions
+///
+/// **Legacy (per-image WebSocket):**
+/// - Header: `[version:u8][type:u8][payload...]`
+/// - Each image gets its own WebSocket connection
+///
+/// **Multiplexed (single WebSocket):**
+/// - Header: `[version:u8][type:u8][request_id:u32][payload...]`
+/// - All streams share one WebSocket, identified by request_id
+/// - Connection-level messages (Capabilities, Ping) use request_id = 0
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerMessageType {
@@ -33,11 +44,14 @@ pub enum ServerMessageType {
     /// Pyramid level complete
     LevelComplete = 0x04,
 
-    /// All requested levels sent
+    /// All requested levels sent (legacy) / Stream complete (multiplexed)
     AllComplete = 0x05,
 
     /// Server capabilities (sent on connect)
     Capabilities = 0x06,
+
+    /// Stream error (multiplexed only) - error for specific request_id
+    StreamError = 0x07,
 
     /// SAM embedding ready
     SamReady = 0x10,
@@ -48,7 +62,7 @@ pub enum ServerMessageType {
     /// SAM embedding progress update
     SamProgress = 0x12,
 
-    /// Error with code and context
+    /// Error with code and context (connection-level or legacy per-stream)
     Error = 0xFE,
 
     /// Keepalive ping
@@ -66,6 +80,7 @@ impl ServerMessageType {
             0x04 => Some(Self::LevelComplete),
             0x05 => Some(Self::AllComplete),
             0x06 => Some(Self::Capabilities),
+            0x07 => Some(Self::StreamError),
             0x10 => Some(Self::SamReady),
             0x11 => Some(Self::SamMask),
             0x12 => Some(Self::SamProgress),
@@ -79,15 +94,33 @@ impl ServerMessageType {
     pub fn to_byte(self) -> u8 {
         self as u8
     }
+
+    /// Returns true if this message type is connection-level (not stream-specific).
+    ///
+    /// Connection-level messages use request_id = 0 in the multiplexed protocol.
+    pub fn is_connection_level(&self) -> bool {
+        matches!(self, Self::Capabilities | Self::Ping | Self::Error)
+    }
 }
 
 /// Client message types (client → server, JSON).
 ///
 /// These are sent as JSON text frames over the WebSocket.
+///
+/// # Legacy vs Multiplexed Protocol
+///
+/// **Legacy (per-image WebSocket):**
+/// - `StartStream`, `Cancel` - no request_id needed (one stream per connection)
+///
+/// **Multiplexed (single WebSocket):**
+/// - `StartStreamMux`, `CancelStream` - include request_id for stream identification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ClientMessage {
-    /// Start streaming an image at a specific pyramid level.
+    // ========================================================================
+    // Legacy messages (per-image WebSocket)
+    // ========================================================================
+    /// Start streaming an image at a specific pyramid level (legacy).
     ///
     /// If `progressive` is true, sends all levels from highest (smallest) to
     /// `level` (largest). If false, sends only the requested level.
@@ -97,9 +130,37 @@ pub enum ClientMessage {
         progressive: bool,
     },
 
-    /// Cancel the current stream.
+    /// Cancel the current stream (legacy).
     Cancel,
 
+    // ========================================================================
+    // Multiplexed messages (single WebSocket)
+    // ========================================================================
+    /// Start streaming an image (multiplexed protocol).
+    ///
+    /// Client provides request_id which is echoed back on all response messages.
+    #[serde(rename = "start_stream_mux")]
+    StartStreamMux {
+        /// Client-generated request ID (unique per connection)
+        request_id: u32,
+        /// Image ID to stream
+        image_id: String,
+        /// Target pyramid level (0 = full resolution)
+        level: u32,
+        /// Whether to use progressive loading
+        #[serde(default)]
+        progressive: bool,
+    },
+
+    /// Cancel a specific stream (multiplexed protocol).
+    CancelStream {
+        /// Request ID of stream to cancel
+        request_id: u32,
+    },
+
+    // ========================================================================
+    // Common messages (work with both protocols)
+    // ========================================================================
     /// Request SAM embedding pre-computation.
     SamEmbed,
 
@@ -433,6 +494,19 @@ mod tests {
             ServerMessageType::from_byte(ServerMessageType::Error.to_byte()),
             Some(ServerMessageType::Error)
         );
+        assert_eq!(
+            ServerMessageType::from_byte(ServerMessageType::StreamError.to_byte()),
+            Some(ServerMessageType::StreamError)
+        );
+    }
+
+    #[test]
+    fn test_connection_level_messages() {
+        assert!(ServerMessageType::Capabilities.is_connection_level());
+        assert!(ServerMessageType::Ping.is_connection_level());
+        assert!(ServerMessageType::Error.is_connection_level());
+        assert!(!ServerMessageType::Reset.is_connection_level());
+        assert!(!ServerMessageType::StreamError.is_connection_level());
     }
 
     #[test]

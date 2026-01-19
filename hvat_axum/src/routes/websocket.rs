@@ -386,6 +386,20 @@ async fn handle_client_message(
         ClientMessage::Pong { .. } => {
             // Pong is handled in the receive loop for accurate timing
         }
+
+        // Multiplexed protocol messages - not supported on legacy per-image endpoint
+        ClientMessage::StartStreamMux { .. } | ClientMessage::CancelStream { .. } => {
+            tracing::warn!(
+                "Multiplexed protocol message received on legacy endpoint for {}",
+                image_id
+            );
+            let error = ProtocolError::error(
+                ErrorCode::InvalidAction,
+                "Multiplexed protocol not supported on this endpoint. Use /api/ws instead.",
+            );
+            let error_bytes = encode_error(&error);
+            let _ = tx.send(Message::Binary(error_bytes.into())).await;
+        }
     }
 
     Ok(())
@@ -686,7 +700,7 @@ fn calculate_level_size(full_width: u32, full_height: u32, level: u32) -> (u32, 
 /// - Detected to avoid duplicate builds for the same image
 /// - Cancelled if needed (future enhancement)
 /// - Cleaned up when complete
-async fn spawn_pyramid_task(state: Arc<AppState>, image_path: &Path, image_hash: &str) {
+pub async fn spawn_pyramid_task(state: Arc<AppState>, image_path: &Path, image_hash: &str) {
     let builder = state.pyramid_builder.clone();
     let storage = state.pyramid_storage.clone();
     let loaders = state.loaders.clone();
@@ -750,38 +764,51 @@ async fn handle_sam_embed(
     let image_path = find_image(state, image_id)?;
     let image_hash = compute_image_hash(&image_path)?;
 
-    // Check if embedding is already cached
-    if state.embedding_cache.contains(&image_hash).await {
-        tracing::info!("SAM embedding cache hit for {}", image_id);
-        let response = ServerResponse::SamEmbeddingReady {
-            image_id: image_id.to_string(),
-        };
-        if let Ok(json) = serde_json::to_string(&response) {
-            let _ = tx.send(Message::Text(json.into())).await;
+    // Load image metadata to get current dimensions
+    let loader = state
+        .loaders
+        .find_loader(&image_path)
+        .ok_or_else(|| Error::UnsupportedFormat(image_id.to_string()))?;
+    let meta = loader.load_metadata(&image_path).await?;
+    let current_width = meta.width;
+    let current_height = meta.height;
+
+    // Check if embedding is already cached with correct dimensions
+    if let Some(cached) = state.embedding_cache.get(&image_hash).await {
+        if cached.width == current_width && cached.height == current_height {
+            tracing::info!("SAM embedding cache hit for {}", image_id);
+            let response = ServerResponse::SamEmbeddingReady {
+                image_id: image_id.to_string(),
+            };
+            if let Ok(json) = serde_json::to_string(&response) {
+                let _ = tx.send(Message::Text(json.into())).await;
+            }
+            return Ok(());
         }
-        return Ok(());
+        // Dimension mismatch - remove stale cache entry
+        tracing::warn!(
+            "SAM embedding cache dimension mismatch for {}: cached={}x{}, current={}x{}, recomputing",
+            image_id,
+            cached.width,
+            cached.height,
+            current_width,
+            current_height
+        );
+        state.embedding_cache.remove(&image_hash).await;
     }
 
     tracing::info!("Computing SAM embedding for {}", image_id);
 
-    // Load the image as RGB
-    let (rgb_data, width, height) = load_image_rgb(state, &image_path).await?;
-
-    // Compute embedding (encoder pass)
-    let encoder_output = sam_engine
-        .encode_image(&rgb_data, width, height)
-        .await
-        .map_err(|e| Error::Internal(format!("SAM encoding failed: {}", e)))?;
-
-    // Cache the embedding with all encoder outputs
-    let cached = CachedEmbedding {
-        image_embed: encoder_output.image_embed,
-        high_res_feats_0: encoder_output.high_res_feats_0,
-        high_res_feats_1: encoder_output.high_res_feats_1,
-        width,
-        height,
-    };
-    state.embedding_cache.insert(image_hash, cached).await;
+    // Compute and cache embedding
+    compute_and_cache_embedding(
+        state,
+        sam_engine,
+        &image_path,
+        &image_hash,
+        current_width,
+        current_height,
+    )
+    .await?;
 
     tracing::info!("SAM embedding computed and cached for {}", image_id);
 
@@ -817,35 +844,53 @@ async fn handle_sam_segment(
     let image_path = find_image(state, image_id)?;
     let image_hash = compute_image_hash(&image_path)?;
 
+    // Load image metadata to get current dimensions
+    let loader = state
+        .loaders
+        .find_loader(&image_path)
+        .ok_or_else(|| Error::UnsupportedFormat(image_id.to_string()))?;
+    let meta = loader.load_metadata(&image_path).await?;
+    let current_width = meta.width;
+    let current_height = meta.height;
+
     // Get or compute embedding
     let cached = if let Some(cached) = state.embedding_cache.get_and_touch(&image_hash).await {
-        tracing::debug!("SAM embedding cache hit for segment request");
-        cached
+        // Validate cached embedding dimensions match current image
+        if cached.width != current_width || cached.height != current_height {
+            tracing::warn!(
+                "SAM embedding cache dimension mismatch for {}: cached={}x{}, current={}x{}, recomputing",
+                image_id,
+                cached.width,
+                cached.height,
+                current_width,
+                current_height
+            );
+            // Remove stale embedding and recompute
+            state.embedding_cache.remove(&image_hash).await;
+            compute_and_cache_embedding(
+                state,
+                sam_engine,
+                &image_path,
+                &image_hash,
+                current_width,
+                current_height,
+            )
+            .await?
+        } else {
+            tracing::debug!("SAM embedding cache hit for segment request");
+            cached
+        }
     } else {
         tracing::info!("Computing SAM embedding on-demand for {}", image_id);
-
-        // Load image and compute embedding
-        let (rgb_data, width, height) = load_image_rgb(state, &image_path).await?;
-        let encoder_output = sam_engine
-            .encode_image(&rgb_data, width, height)
-            .await
-            .map_err(|e| Error::Internal(format!("SAM encoding failed: {}", e)))?;
-
-        let cached = CachedEmbedding {
-            image_embed: encoder_output.image_embed,
-            high_res_feats_0: encoder_output.high_res_feats_0,
-            high_res_feats_1: encoder_output.high_res_feats_1,
-            width,
-            height,
-        };
-
-        // Cache for future requests
-        state
-            .embedding_cache
-            .insert(image_hash.clone(), cached.clone())
-            .await;
-
-        cached
+        compute_and_cache_embedding(
+            state,
+            sam_engine,
+            &image_path,
+            &image_hash,
+            current_width,
+            current_height,
+        )
+        .await?
     };
 
     // Convert protocol points to backend points
@@ -905,6 +950,41 @@ async fn handle_sam_segment(
     );
 
     Ok(())
+}
+
+/// Compute SAM embedding and cache it.
+///
+/// Helper function to avoid code duplication between cache miss and dimension mismatch cases.
+async fn compute_and_cache_embedding(
+    state: &AppState,
+    sam_engine: &Arc<dyn crate::sam::SamBackend>,
+    image_path: &std::path::Path,
+    image_hash: &str,
+    width: u32,
+    height: u32,
+) -> Result<CachedEmbedding, Error> {
+    // Load image and compute embedding
+    let (rgb_data, _, _) = load_image_rgb(state, image_path).await?;
+    let encoder_output = sam_engine
+        .encode_image(&rgb_data, width, height)
+        .await
+        .map_err(|e| Error::Internal(format!("SAM encoding failed: {}", e)))?;
+
+    let cached = CachedEmbedding {
+        image_embed: encoder_output.image_embed,
+        high_res_feats_0: encoder_output.high_res_feats_0,
+        high_res_feats_1: encoder_output.high_res_feats_1,
+        width,
+        height,
+    };
+
+    // Cache for future requests
+    state
+        .embedding_cache
+        .insert(image_hash.to_string(), cached.clone())
+        .await;
+
+    Ok(cached)
 }
 
 /// Load image as RGB data for SAM processing.

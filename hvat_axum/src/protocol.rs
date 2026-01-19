@@ -3,6 +3,17 @@
 //! The protocol uses:
 //! - JSON text frames for client→server commands and server→client responses
 //! - Binary frames for image layer data (server→client only)
+//!
+//! # Protocol Versions
+//!
+//! **Legacy (per-image WebSocket endpoint: `/api/images/{id}/stream`):**
+//! - Binary header: `[version:u8][type:u8][payload...]`
+//! - Each image gets its own WebSocket connection
+//!
+//! **Multiplexed (single WebSocket endpoint: `/api/ws`):**
+//! - Binary header: `[version:u8][type:u8][request_id:u32][payload...]`
+//! - All streams share one WebSocket, identified by request_id
+//! - Connection-level messages (Capabilities, Ping) use request_id = 0
 
 use serde::{Deserialize, Serialize};
 
@@ -62,7 +73,7 @@ pub struct StreamMetadata {
 }
 
 impl StreamMetadata {
-    /// Encode metadata as binary (protocol v1).
+    /// Encode metadata as binary (legacy protocol).
     ///
     /// Format: `[version:u8][type:u8][width:u32][height:u32][num_bands:u32][num_layers:u32][full_width:u32][full_height:u32]`
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -77,16 +88,50 @@ impl StreamMetadata {
         buf.extend_from_slice(&self.full_height.to_le_bytes());
         buf
     }
+
+    /// Encode metadata with request_id (multiplexed protocol).
+    ///
+    /// Format: `[version:u8][type:u8][request_id:u32][width:u32][height:u32][num_bands:u32][num_layers:u32][full_width:u32][full_height:u32]`
+    pub fn to_bytes_mux(&self, request_id: u32) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(30);
+        buf.push(PROTOCOL_VERSION);
+        buf.push(ServerMessageType::Metadata.to_byte());
+        buf.extend_from_slice(&request_id.to_le_bytes());
+        buf.extend_from_slice(&self.width.to_le_bytes());
+        buf.extend_from_slice(&self.height.to_le_bytes());
+        buf.extend_from_slice(&self.num_bands.to_le_bytes());
+        buf.extend_from_slice(&self.num_layers.to_le_bytes());
+        buf.extend_from_slice(&self.full_width.to_le_bytes());
+        buf.extend_from_slice(&self.full_height.to_le_bytes());
+        buf
+    }
 }
 
-/// Encode a Reset message.
+// ============================================================================
+// Legacy Encoding Functions (per-image WebSocket)
+// ============================================================================
+
+/// Encode a Reset message (legacy protocol).
 ///
 /// This signals the client to clear the current display before a new image loads.
 pub fn encode_reset() -> Vec<u8> {
     vec![PROTOCOL_VERSION, ServerMessageType::Reset.to_byte()]
 }
 
-/// Encode a layer chunk message.
+// ============================================================================
+// Multiplexed Encoding Functions (single WebSocket)
+// ============================================================================
+
+/// Encode a Reset message with request_id (multiplexed protocol).
+pub fn encode_reset_mux(request_id: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(6);
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::Reset.to_byte());
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf
+}
+
+/// Encode a layer chunk message (legacy protocol).
 pub fn encode_layer_chunk(layer: u16, row_start: u32, row_end: u32, rgba_data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(12 + rgba_data.len());
     buf.push(PROTOCOL_VERSION);
@@ -98,7 +143,26 @@ pub fn encode_layer_chunk(layer: u16, row_start: u32, row_end: u32, rgba_data: &
     buf
 }
 
-/// Encode a layer complete message.
+/// Encode a layer chunk message with request_id (multiplexed protocol).
+pub fn encode_layer_chunk_mux(
+    request_id: u32,
+    layer: u16,
+    row_start: u32,
+    row_end: u32,
+    rgba_data: &[u8],
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16 + rgba_data.len());
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::LayerChunk.to_byte());
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf.extend_from_slice(&layer.to_le_bytes());
+    buf.extend_from_slice(&row_start.to_le_bytes());
+    buf.extend_from_slice(&row_end.to_le_bytes());
+    buf.extend_from_slice(rgba_data);
+    buf
+}
+
+/// Encode a layer complete message (legacy protocol).
 pub fn encode_layer_complete(layer: u16) -> Vec<u8> {
     let mut buf = Vec::with_capacity(4);
     buf.push(PROTOCOL_VERSION);
@@ -107,7 +171,17 @@ pub fn encode_layer_complete(layer: u16) -> Vec<u8> {
     buf
 }
 
-/// Encode a level complete message.
+/// Encode a layer complete message with request_id (multiplexed protocol).
+pub fn encode_layer_complete_mux(request_id: u32, layer: u16) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8);
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::LayerComplete.to_byte());
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf.extend_from_slice(&layer.to_le_bytes());
+    buf
+}
+
+/// Encode a level complete message (legacy protocol).
 pub fn encode_level_complete(level: u8) -> Vec<u8> {
     vec![
         PROTOCOL_VERSION,
@@ -116,9 +190,43 @@ pub fn encode_level_complete(level: u8) -> Vec<u8> {
     ]
 }
 
-/// Encode an all complete message (all levels sent).
+/// Encode a level complete message with request_id (multiplexed protocol).
+pub fn encode_level_complete_mux(request_id: u32, level: u8) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(7);
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::LevelComplete.to_byte());
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf.push(level);
+    buf
+}
+
+/// Encode an all complete message (legacy protocol - all levels sent).
 pub fn encode_all_complete() -> Vec<u8> {
     vec![PROTOCOL_VERSION, ServerMessageType::AllComplete.to_byte()]
+}
+
+/// Encode a stream complete message with request_id (multiplexed protocol).
+///
+/// This signals that all data for the given request_id has been sent.
+pub fn encode_stream_complete(request_id: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(6);
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::AllComplete.to_byte());
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf
+}
+
+/// Encode a stream-specific error (multiplexed protocol).
+///
+/// This sends an error for a specific stream without affecting other streams.
+pub fn encode_stream_error(request_id: u32, error: &ProtocolError) -> Vec<u8> {
+    let error_payload = error.encode_payload();
+    let mut buf = Vec::with_capacity(6 + error_payload.len());
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::StreamError.to_byte());
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf.extend_from_slice(&error_payload);
+    buf
 }
 
 /// Encode an error message using the new protocol.
@@ -347,5 +455,101 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::ProtocolMismatch);
         assert!(!error.retryable);
+    }
+
+    // ========================================================================
+    // Multiplexed Protocol Tests
+    // ========================================================================
+
+    #[test]
+    fn test_reset_mux_encoding() {
+        let reset = encode_reset_mux(42);
+        assert_eq!(reset.len(), 6);
+        assert_eq!(reset[0], PROTOCOL_VERSION);
+        assert_eq!(reset[1], ServerMessageType::Reset.to_byte());
+        assert_eq!(
+            u32::from_le_bytes([reset[2], reset[3], reset[4], reset[5]]),
+            42
+        );
+    }
+
+    #[test]
+    fn test_metadata_mux_encoding() {
+        let meta = StreamMetadata {
+            width: 1024,
+            height: 768,
+            num_bands: 10,
+            num_layers: 3,
+            full_width: 2048,
+            full_height: 1536,
+        };
+        let bytes = meta.to_bytes_mux(123);
+
+        assert_eq!(bytes.len(), 30); // 2 header + 4 request_id + 24 payload
+        assert_eq!(bytes[0], PROTOCOL_VERSION);
+        assert_eq!(bytes[1], ServerMessageType::Metadata.to_byte());
+
+        // Verify request_id
+        assert_eq!(
+            u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]),
+            123
+        );
+
+        // Verify width (offset by 4 for request_id)
+        assert_eq!(
+            u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]),
+            1024
+        );
+    }
+
+    #[test]
+    fn test_layer_chunk_mux_encoding() {
+        let data = vec![255u8, 128, 64, 32];
+        let chunk = encode_layer_chunk_mux(42, 0, 0, 10, &data);
+
+        assert_eq!(chunk[0], PROTOCOL_VERSION);
+        assert_eq!(chunk[1], ServerMessageType::LayerChunk.to_byte());
+
+        // Verify request_id
+        assert_eq!(
+            u32::from_le_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]),
+            42
+        );
+
+        // Verify layer index (offset by 4)
+        assert_eq!(u16::from_le_bytes([chunk[6], chunk[7]]), 0);
+
+        // Verify data (offset by 4)
+        assert_eq!(&chunk[16..], &data[..]);
+    }
+
+    #[test]
+    fn test_stream_complete_encoding() {
+        let complete = encode_stream_complete(99);
+        assert_eq!(complete.len(), 6);
+        assert_eq!(complete[0], PROTOCOL_VERSION);
+        assert_eq!(complete[1], ServerMessageType::AllComplete.to_byte());
+        assert_eq!(
+            u32::from_le_bytes([complete[2], complete[3], complete[4], complete[5]]),
+            99
+        );
+    }
+
+    #[test]
+    fn test_stream_error_encoding() {
+        let error = ProtocolError::error(ErrorCode::ImageNotFound, "Image not found");
+        let encoded = encode_stream_error(42, &error);
+
+        assert_eq!(encoded[0], PROTOCOL_VERSION);
+        assert_eq!(encoded[1], ServerMessageType::StreamError.to_byte());
+        assert_eq!(
+            u32::from_le_bytes([encoded[2], encoded[3], encoded[4], encoded[5]]),
+            42
+        );
+
+        // Verify the error payload follows the request_id
+        let payload = &encoded[6..];
+        let decoded_error = ProtocolError::decode(payload).unwrap();
+        assert_eq!(decoded_error.code, ErrorCode::ImageNotFound);
     }
 }
