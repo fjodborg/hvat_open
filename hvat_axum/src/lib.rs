@@ -19,6 +19,7 @@
 
 pub mod config;
 pub mod error;
+pub mod inference;
 pub mod loaders;
 pub mod packer;
 pub mod protocol;

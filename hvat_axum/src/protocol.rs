@@ -19,10 +19,9 @@ use serde::{Deserialize, Serialize};
 
 // Re-export shared protocol types from hvat_common
 pub use hvat_common::protocol::{
-    ClientMessage, ErrorCode, PROTOCOL_VERSION, SamPoint, ServerCapabilities, ServerMessageType,
-    Severity,
+    ClientMessage, ErrorCode, PROTOCOL_VERSION, ServerMessageType, Severity,
 };
-pub use hvat_common::{ErrorContext, ProtocolError};
+pub use hvat_common::{ErrorContext, ProtocolError, ServerCapabilities};
 
 /// Server-to-client JSON response types.
 ///
@@ -202,7 +201,10 @@ pub fn encode_level_complete_mux(request_id: u32, level: u8) -> Vec<u8> {
 
 /// Encode an all complete message (legacy protocol - all levels sent).
 pub fn encode_all_complete() -> Vec<u8> {
-    vec![PROTOCOL_VERSION, ServerMessageType::AllComplete.to_byte()]
+    vec![
+        PROTOCOL_VERSION,
+        ServerMessageType::StreamComplete.to_byte(),
+    ]
 }
 
 /// Encode a stream complete message with request_id (multiplexed protocol).
@@ -211,7 +213,7 @@ pub fn encode_all_complete() -> Vec<u8> {
 pub fn encode_stream_complete(request_id: u32) -> Vec<u8> {
     let mut buf = Vec::with_capacity(6);
     buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::AllComplete.to_byte());
+    buf.push(ServerMessageType::StreamComplete.to_byte());
     buf.extend_from_slice(&request_id.to_le_bytes());
     buf
 }
@@ -247,8 +249,12 @@ pub fn encode_simple_error(code: ErrorCode, message: &str) -> Vec<u8> {
 ///
 /// This is sent immediately on WebSocket connection to inform the client
 /// about server features and protocol version.
+///
+/// **Deprecated:** Use `encode_capabilities_v2` instead. This function exists
+/// for backwards compatibility during migration.
+#[deprecated(note = "Use encode_capabilities_v2 instead")]
 pub fn encode_capabilities(capabilities: &ServerCapabilities) -> Vec<u8> {
-    capabilities.encode()
+    encode_capabilities_v2(capabilities)
 }
 
 /// Encode a Ping message for keepalive.
@@ -260,6 +266,91 @@ pub fn encode_ping(timestamp: u64) -> Vec<u8> {
     buf.push(PROTOCOL_VERSION);
     buf.push(ServerMessageType::Ping.to_byte());
     buf.extend_from_slice(&timestamp.to_le_bytes());
+    buf
+}
+
+// ============================================================================
+// Inference Protocol Messages (Protocol v2)
+// ============================================================================
+
+/// Encode an ImageSet message (multiplexed protocol).
+///
+/// Confirms that the active image context has been set successfully.
+///
+/// Format: `[version:u8][type:u8][request_id:u32][image_id_len:u16][image_id:utf8]`
+pub fn encode_image_set(request_id: u32, image_id: &str) -> Vec<u8> {
+    let image_id_bytes = image_id.as_bytes();
+    let mut buf = Vec::with_capacity(8 + image_id_bytes.len());
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::ImageSet.to_byte());
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf.extend_from_slice(&(image_id_bytes.len() as u16).to_le_bytes());
+    buf.extend_from_slice(image_id_bytes);
+    buf
+}
+
+/// Encode a ModelReady message (multiplexed protocol).
+///
+/// Indicates that model embedding has been computed and is ready for inference.
+///
+/// Format: `[version:u8][type:u8][request_id:u32][model_id_len:u16][model_id:utf8]`
+pub fn encode_model_ready(request_id: u32, model_id: &str) -> Vec<u8> {
+    let model_id_bytes = model_id.as_bytes();
+    let mut buf = Vec::with_capacity(8 + model_id_bytes.len());
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::ModelReady.to_byte());
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
+    buf.extend_from_slice(model_id_bytes);
+    buf
+}
+
+/// Encode an InferProgress message (multiplexed protocol).
+///
+/// Reports progress during model inference or embedding computation.
+///
+/// Format: `[version:u8][type:u8][request_id:u32][progress:u8][status_len:u16][status:utf8]`
+pub fn encode_infer_progress(request_id: u32, progress: u8, status: &str) -> Vec<u8> {
+    let status_bytes = status.as_bytes();
+    let mut buf = Vec::with_capacity(9 + status_bytes.len());
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::InferProgress.to_byte());
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf.push(progress);
+    buf.extend_from_slice(&(status_bytes.len() as u16).to_le_bytes());
+    buf.extend_from_slice(status_bytes);
+    buf
+}
+
+/// Encode an InferResult message (multiplexed protocol).
+///
+/// Returns inference results as JSON matching the model's output schema.
+///
+/// Format: `[version:u8][type:u8][request_id:u32][json_payload:utf8]`
+pub fn encode_infer_result(request_id: u32, result_json: &str) -> Vec<u8> {
+    let json_bytes = result_json.as_bytes();
+    let mut buf = Vec::with_capacity(6 + json_bytes.len());
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::InferResult.to_byte());
+    buf.extend_from_slice(&request_id.to_le_bytes());
+    buf.extend_from_slice(json_bytes);
+    buf
+}
+
+/// Encode server capabilities as JSON (Protocol v2).
+///
+/// This replaces the binary encoding used in v1. The capabilities are sent
+/// as a binary message with a JSON payload.
+///
+/// Format: `[version:u8][type:u8][request_id=0:u32][json_payload:utf8]`
+pub fn encode_capabilities_v2(capabilities: &hvat_common::ServerCapabilities) -> Vec<u8> {
+    let json = serde_json::to_string(capabilities).unwrap();
+    let json_bytes = json.as_bytes();
+    let mut buf = Vec::with_capacity(6 + json_bytes.len());
+    buf.push(PROTOCOL_VERSION);
+    buf.push(ServerMessageType::Capabilities.to_byte());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // request_id = 0 for connection-level
+    buf.extend_from_slice(json_bytes);
     buf
 }
 
@@ -329,14 +420,35 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
+    // TODO: [Phase 6] shouldn this exist?
     fn test_capabilities_encoding() {
+        use hvat_common::{ModelCapability, ModelType, ServerInfo, ServerLimits};
+        use std::collections::HashMap;
+
         let caps = ServerCapabilities {
             protocol_version: PROTOCOL_VERSION,
-            max_image_size: 4 * 1024 * 1024 * 1024,
-            max_pyramid_levels: 8,
-            sam_enabled: true,
-            sam_model: "tiny".to_string(),
-            max_concurrent_streams: 4,
+            server: ServerInfo {
+                name: "hvat-axum".to_string(),
+                version: "0.1.0".to_string(),
+            },
+            limits: ServerLimits {
+                max_image_size: 4 * 1024 * 1024 * 1024,
+                max_pyramid_levels: 8,
+                max_concurrent_streams: 4,
+                max_concurrent_inferences: 2,
+            },
+            models: vec![ModelCapability {
+                id: "sam-tiny".to_string(),
+                name: "SAM Tiny".to_string(),
+                model_type: ModelType::Segmentation,
+                description: "Segment Anything Model (Tiny)".to_string(),
+                inputs: vec![],
+                outputs: vec![],
+                options: HashMap::new(),
+                requires_embedding: true,
+                embedding_time_ms: 500,
+            }],
         };
 
         let encoded = encode_capabilities(&caps);
@@ -345,12 +457,20 @@ mod tests {
         assert_eq!(encoded[0], PROTOCOL_VERSION);
         assert_eq!(encoded[1], ServerMessageType::Capabilities.to_byte());
 
-        // Verify it can be decoded by client
-        let decoded = ServerCapabilities::decode(&encoded[2..]).unwrap();
+        // Verify request_id is 0 (connection-level)
+        assert_eq!(
+            u32::from_le_bytes([encoded[2], encoded[3], encoded[4], encoded[5]]),
+            0
+        );
+
+        // Verify it can be decoded as JSON by client
+        let json_payload = &encoded[6..];
+        let decoded: ServerCapabilities = serde_json::from_slice(json_payload).unwrap();
         assert_eq!(decoded.protocol_version, PROTOCOL_VERSION);
-        assert!(decoded.sam_enabled);
-        assert_eq!(decoded.sam_model, "tiny");
-        assert_eq!(decoded.max_concurrent_streams, 4);
+        assert_eq!(decoded.server.name, "hvat-axum");
+        assert_eq!(decoded.limits.max_concurrent_streams, 4);
+        assert_eq!(decoded.models.len(), 1);
+        assert_eq!(decoded.models[0].id, "sam-tiny");
     }
 
     /// Integration test: simulates full client-server protocol exchange.
@@ -369,7 +489,7 @@ mod tests {
 
         // 1. Server sends Capabilities on connect
         let caps = ServerCapabilities::default();
-        server_messages.push(encode_capabilities(&caps));
+        server_messages.push(encode_capabilities_v2(&caps));
 
         // 2. Server sends Reset before new image
         server_messages.push(encode_reset());
@@ -415,7 +535,7 @@ mod tests {
             match i {
                 0 => {
                     assert_eq!(msg_type, ServerMessageType::Capabilities);
-                    let decoded_caps = ServerCapabilities::decode(payload).unwrap();
+                    let decoded_caps: ServerCapabilities = serde_json::from_slice(payload).unwrap();
                     assert_eq!(decoded_caps.protocol_version, PROTOCOL_VERSION);
                     // Simulate client version check
                     assert!(decoded_caps.is_compatible(PROTOCOL_VERSION));
@@ -528,7 +648,7 @@ mod tests {
         let complete = encode_stream_complete(99);
         assert_eq!(complete.len(), 6);
         assert_eq!(complete[0], PROTOCOL_VERSION);
-        assert_eq!(complete[1], ServerMessageType::AllComplete.to_byte());
+        assert_eq!(complete[1], ServerMessageType::StreamComplete.to_byte());
         assert_eq!(
             u32::from_le_bytes([complete[2], complete[3], complete[4], complete[5]]),
             99

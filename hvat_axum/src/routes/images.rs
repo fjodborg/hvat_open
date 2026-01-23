@@ -5,9 +5,9 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, State, WebSocketUpgrade},
+    extract::{Path, State},
     http::{StatusCode, header},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::get,
 };
 use hvat_common::pixel_count_u32;
@@ -17,8 +17,6 @@ use crate::error::{Error, Result};
 use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::state::AppState;
 use crate::utils::find_image;
-
-use super::websocket::handle_websocket;
 
 /// Image metadata response.
 #[derive(Debug, Serialize)]
@@ -63,7 +61,7 @@ pub struct PyramidLevel {
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/{id}/meta", get(get_metadata))
-        .route("/{id}/stream", get(stream_handler))
+        // Legacy /{id}/stream route removed - use /api/ws multiplexed endpoint instead
         .route("/{id}/thumbnail", get(get_thumbnail))
 }
 
@@ -140,15 +138,6 @@ async fn get_metadata(
             levels,
         },
     }))
-}
-
-/// WebSocket upgrade handler for streaming.
-async fn stream_handler(
-    State(state): State<Arc<AppState>>,
-    Path(image_id): Path<String>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    ws.on_upgrade(move |socket| handle_websocket(socket, state, image_id))
 }
 
 /// Get a thumbnail PNG for an image.

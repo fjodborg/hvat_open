@@ -1,34 +1,42 @@
 //! WebSocket protocol types shared between client and server.
 //!
 //! This module defines the binary protocol for streaming hyperspectral images
-//! over WebSocket connections. The protocol is versioned to allow future
-//! extensions while maintaining backward compatibility.
+//! and running model inference over WebSocket connections. The protocol is
+//! versioned to allow future extensions while maintaining backward compatibility.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// SAM point for legacy protocol (will be removed).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SamPoint {
+    pub x: f32,
+    pub y: f32,
+    pub label: i32,
+}
 
 /// Current protocol version.
 ///
-/// Increment this on breaking changes. Clients and servers negotiate
-/// compatibility during connection establishment.
-pub const PROTOCOL_VERSION: u8 = 1;
+/// Version 2: Model-agnostic inference protocol with self-describing capabilities.
+/// Version 1: Legacy protocol with hardcoded SAM messages.
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Binary message types (server → client).
 ///
 /// The first byte of every binary WebSocket message identifies its type.
 ///
-/// # Protocol Versions
+/// # Protocol Format
 ///
-/// **Legacy (per-image WebSocket):**
-/// - Header: `[version:u8][type:u8][payload...]`
-/// - Each image gets its own WebSocket connection
-///
-/// **Multiplexed (single WebSocket):**
+/// **Multiplexed WebSocket:**
 /// - Header: `[version:u8][type:u8][request_id:u32][payload...]`
-/// - All streams share one WebSocket, identified by request_id
+/// - All streams share one WebSocket at `/api/ws`, identified by request_id
 /// - Connection-level messages (Capabilities, Ping) use request_id = 0
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerMessageType {
+    // ========================================================================
+    // Streaming messages (0x00-0x0F)
+    // ========================================================================
     /// Clear display, new image starting (no payload)
     Reset = 0x00,
 
@@ -44,25 +52,34 @@ pub enum ServerMessageType {
     /// Pyramid level complete
     LevelComplete = 0x04,
 
-    /// All requested levels sent (legacy) / Stream complete (multiplexed)
-    AllComplete = 0x05,
+    /// Stream complete (all requested levels sent)
+    StreamComplete = 0x05,
 
     /// Server capabilities (sent on connect)
     Capabilities = 0x06,
 
-    /// Stream error (multiplexed only) - error for specific request_id
+    /// Stream error - error for specific request_id
     StreamError = 0x07,
 
-    /// SAM embedding ready
-    SamReady = 0x10,
+    // ========================================================================
+    // Inference messages (0x10-0x1F)
+    // ========================================================================
+    /// Image context set successfully
+    ImageSet = 0x10,
 
-    /// SAM segmentation result
-    SamMask = 0x11,
+    /// Model embedding ready for inference
+    ModelReady = 0x11,
 
-    /// SAM embedding progress update
-    SamProgress = 0x12,
+    /// Inference progress update (optional)
+    InferProgress = 0x12,
 
-    /// Error with code and context (connection-level or legacy per-stream)
+    /// Inference result (JSON payload)
+    InferResult = 0x13,
+
+    // ========================================================================
+    // Connection-level messages (0xFE-0xFF)
+    // ========================================================================
+    /// Error with code and context (connection-level)
     Error = 0xFE,
 
     /// Keepalive ping
@@ -78,12 +95,13 @@ impl ServerMessageType {
             0x02 => Some(Self::LayerChunk),
             0x03 => Some(Self::LayerComplete),
             0x04 => Some(Self::LevelComplete),
-            0x05 => Some(Self::AllComplete),
+            0x05 => Some(Self::StreamComplete),
             0x06 => Some(Self::Capabilities),
             0x07 => Some(Self::StreamError),
-            0x10 => Some(Self::SamReady),
-            0x11 => Some(Self::SamMask),
-            0x12 => Some(Self::SamProgress),
+            0x10 => Some(Self::ImageSet),
+            0x11 => Some(Self::ModelReady),
+            0x12 => Some(Self::InferProgress),
+            0x13 => Some(Self::InferResult),
             0xFE => Some(Self::Error),
             0xFF => Some(Self::Ping),
             _ => None,
@@ -107,81 +125,67 @@ impl ServerMessageType {
 ///
 /// These are sent as JSON text frames over the WebSocket.
 ///
-/// # Legacy vs Multiplexed Protocol
+/// # Multiplexed Protocol
 ///
-/// **Legacy (per-image WebSocket):**
-/// - `StartStream`, `Cancel` - no request_id needed (one stream per connection)
-///
-/// **Multiplexed (single WebSocket):**
-/// - `StartStreamMux`, `CancelStream` - include request_id for stream identification
+/// All messages include `request_id` for correlation with server responses.
+/// The client generates unique request IDs per connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ClientMessage {
     // ========================================================================
-    // Legacy messages (per-image WebSocket)
+    // Image context messages
     // ========================================================================
-    /// Start streaming an image at a specific pyramid level (legacy).
+    /// Set active image context for subsequent operations.
+    ///
+    /// This must be called before `stream_image` or `infer`.
+    SetImage { request_id: u32, image_id: String },
+
+    // ========================================================================
+    // Streaming messages
+    // ========================================================================
+    /// Request image streaming.
     ///
     /// If `progressive` is true, sends all levels from highest (smallest) to
     /// `level` (largest). If false, sends only the requested level.
-    StartStream {
+    StreamImage {
+        request_id: u32,
         level: u32,
         #[serde(default)]
         progressive: bool,
     },
 
-    /// Cancel the current stream (legacy).
-    Cancel,
+    /// Cancel a specific stream.
+    CancelStream { request_id: u32 },
 
     // ========================================================================
-    // Multiplexed messages (single WebSocket)
+    // Model inference messages
     // ========================================================================
-    /// Start streaming an image (multiplexed protocol).
+    /// Pre-compute model embeddings (for models that require it).
     ///
-    /// Client provides request_id which is echoed back on all response messages.
-    #[serde(rename = "start_stream_mux")]
-    StartStreamMux {
-        /// Client-generated request ID (unique per connection)
+    /// Called when user selects a model with `requires_embedding: true`.
+    /// Server responds with `ModelReady` when done.
+    PrepareModel { request_id: u32, model_id: String },
+
+    /// Run inference with the active image.
+    ///
+    /// The `inputs` object must match the model's input schema.
+    /// The `options` object can override model defaults.
+    Infer {
         request_id: u32,
-        /// Image ID to stream
-        image_id: String,
-        /// Target pyramid level (0 = full resolution)
-        level: u32,
-        /// Whether to use progressive loading
+        model_id: String,
+        inputs: serde_json::Value,
         #[serde(default)]
-        progressive: bool,
+        options: serde_json::Value,
     },
 
-    /// Cancel a specific stream (multiplexed protocol).
-    CancelStream {
-        /// Request ID of stream to cancel
-        request_id: u32,
-    },
+    /// Cancel an ongoing inference operation.
+    CancelInfer { request_id: u32 },
 
     // ========================================================================
-    // Common messages (work with both protocols)
+    // Connection messages
     // ========================================================================
-    /// Request SAM embedding pre-computation.
-    SamEmbed,
-
-    /// Request SAM segmentation with point/box prompts.
-    SamSegment {
-        points: Vec<SamPoint>,
-        #[serde(rename = "box", skip_serializing_if = "Option::is_none")]
-        box_prompt: Option<[f32; 4]>,
-    },
-
     /// Respond to server ping.
     Pong { timestamp: u64 },
-}
-
-/// SAM point prompt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SamPoint {
-    pub x: f32,
-    pub y: f32,
-    /// 1 = foreground, 0 = background
-    pub label: i32,
 }
 
 /// Error codes organized by category.
@@ -189,7 +193,7 @@ pub struct SamPoint {
 /// Error codes follow a hierarchical scheme:
 /// - 1xxx: Image-related errors
 /// - 2xxx: Pyramid-related errors
-/// - 3xxx: SAM-related errors
+/// - 3xxx: Inference/model-related errors
 /// - 4xxx: Connection-related errors
 /// - 5xxx: Server-related errors
 /// - 6xxx: Client-related errors
@@ -202,6 +206,7 @@ pub enum ErrorCode {
     ImageCorrupted = 1002,
     UnsupportedFormat = 1003,
     ImageTooLarge = 1004,
+    NoActiveImage = 1010,
 
     // Pyramid errors (2xxx)
     PyramidNotReady = 2000,
@@ -210,15 +215,16 @@ pub enum ErrorCode {
     PyramidStorageFull = 2003,
     PyramidTimeout = 2004,
 
-    // SAM errors (3xxx)
-    SamNotEnabled = 3000,
-    SamModelNotLoaded = 3001,
-    SamEncodeFailed = 3002,
-    SamDecodeFailed = 3003,
-    SamOutOfMemory = 3004,
-    SamInvalidPrompt = 3005,
-    SamEmbeddingExpired = 3006,
-    SamBusy = 3007,
+    // Inference/model errors (3xxx)
+    ModelNotFound = 3010,
+    InvalidInput = 3011,
+    MissingInput = 3012,
+    EmbeddingRequired = 3013,
+    EmbeddingExpired = 3014,
+    ModelBusy = 3015,
+    ModelEncodeFailed = 3016,
+    ModelDecodeFailed = 3017,
+    ModelOutOfMemory = 3018,
 
     // Connection errors (4xxx)
     ConnectionTimeout = 4000,
@@ -251,7 +257,7 @@ impl ErrorCode {
         match *self as u16 {
             1000..=1999 => ErrorCategory::Image,
             2000..=2999 => ErrorCategory::Pyramid,
-            3000..=3999 => ErrorCategory::Sam,
+            3000..=3999 => ErrorCategory::Model,
             4000..=4999 => ErrorCategory::Connection,
             5000..=5999 => ErrorCategory::Server,
             6000..=6999 => ErrorCategory::Client,
@@ -264,7 +270,7 @@ impl ErrorCode {
         matches!(
             self,
             Self::PyramidNotReady
-                | Self::SamBusy
+                | Self::ModelBusy
                 | Self::ConnectionTimeout
                 | Self::ConnectionDropped
                 | Self::RateLimited
@@ -277,7 +283,7 @@ impl ErrorCode {
     pub fn default_retry_ms(&self) -> u32 {
         match self {
             Self::PyramidNotReady => 5000,
-            Self::SamBusy => 2000,
+            Self::ModelBusy => 2000,
             Self::RateLimited => 10000,
             Self::ServiceUnavailable => 30000,
             _ => 1000,
@@ -292,19 +298,21 @@ impl ErrorCode {
             1002 => Some(Self::ImageCorrupted),
             1003 => Some(Self::UnsupportedFormat),
             1004 => Some(Self::ImageTooLarge),
+            1010 => Some(Self::NoActiveImage),
             2000 => Some(Self::PyramidNotReady),
             2001 => Some(Self::PyramidBuildFailed),
             2002 => Some(Self::PyramidCorrupted),
             2003 => Some(Self::PyramidStorageFull),
             2004 => Some(Self::PyramidTimeout),
-            3000 => Some(Self::SamNotEnabled),
-            3001 => Some(Self::SamModelNotLoaded),
-            3002 => Some(Self::SamEncodeFailed),
-            3003 => Some(Self::SamDecodeFailed),
-            3004 => Some(Self::SamOutOfMemory),
-            3005 => Some(Self::SamInvalidPrompt),
-            3006 => Some(Self::SamEmbeddingExpired),
-            3007 => Some(Self::SamBusy),
+            3010 => Some(Self::ModelNotFound),
+            3011 => Some(Self::InvalidInput),
+            3012 => Some(Self::MissingInput),
+            3013 => Some(Self::EmbeddingRequired),
+            3014 => Some(Self::EmbeddingExpired),
+            3015 => Some(Self::ModelBusy),
+            3016 => Some(Self::ModelEncodeFailed),
+            3017 => Some(Self::ModelDecodeFailed),
+            3018 => Some(Self::ModelOutOfMemory),
             4000 => Some(Self::ConnectionTimeout),
             4001 => Some(Self::ConnectionRefused),
             4002 => Some(Self::ConnectionDropped),
@@ -333,119 +341,11 @@ impl ErrorCode {
 pub enum ErrorCategory {
     Image,
     Pyramid,
-    Sam,
+    Model,
     Connection,
     Server,
     Client,
     Unknown,
-}
-
-/// Server capabilities sent on WebSocket connect.
-///
-/// This allows clients to discover server features and validate compatibility.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ServerCapabilities {
-    /// Protocol version supported by server
-    pub protocol_version: u8,
-
-    /// Maximum image size in bytes the server will accept
-    pub max_image_size: u64,
-
-    /// Maximum pyramid levels supported
-    pub max_pyramid_levels: u8,
-
-    /// Whether SAM (Segment Anything Model) is enabled
-    pub sam_enabled: bool,
-
-    /// SAM model variant (e.g., "tiny", "base-plus"), empty if SAM disabled
-    pub sam_model: String,
-
-    /// Maximum concurrent streams per connection
-    pub max_concurrent_streams: u32,
-}
-
-impl Default for ServerCapabilities {
-    fn default() -> Self {
-        Self {
-            protocol_version: PROTOCOL_VERSION,
-            max_image_size: 4 * 1024 * 1024 * 1024, // 4GB
-            max_pyramid_levels: 8,
-            sam_enabled: false,
-            sam_model: String::new(),
-            max_concurrent_streams: 4,
-        }
-    }
-}
-
-impl ServerCapabilities {
-    /// Create new capabilities with SAM enabled.
-    pub fn with_sam(mut self, model: impl Into<String>) -> Self {
-        self.sam_enabled = true;
-        self.sam_model = model.into();
-        self
-    }
-
-    /// Encode to binary protocol format.
-    ///
-    /// Format:
-    /// ```text
-    /// [version:u8][type:u8][protocol_version:u8][max_image_size:u64]
-    /// [max_pyramid_levels:u8][sam_enabled:u8][max_concurrent_streams:u32]
-    /// [sam_model_len:u16][sam_model:utf8]
-    /// ```
-    pub fn encode(&self) -> Vec<u8> {
-        let model_bytes = self.sam_model.as_bytes();
-        let mut buf = Vec::with_capacity(18 + model_bytes.len());
-
-        buf.push(PROTOCOL_VERSION);
-        buf.push(ServerMessageType::Capabilities.to_byte());
-        buf.push(self.protocol_version);
-        buf.extend_from_slice(&self.max_image_size.to_le_bytes());
-        buf.push(self.max_pyramid_levels);
-        buf.push(self.sam_enabled as u8);
-        buf.extend_from_slice(&self.max_concurrent_streams.to_le_bytes());
-        buf.extend_from_slice(&(model_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(model_bytes);
-
-        buf
-    }
-
-    /// Decode from binary protocol format.
-    ///
-    /// Expects data to start AFTER the version and type bytes.
-    pub fn decode(data: &[u8]) -> Option<Self> {
-        use crate::BinaryReader;
-
-        let mut reader = BinaryReader::new(data);
-
-        let protocol_version = reader.read_u8()?;
-        let max_image_size = reader.read_u64()?;
-        let max_pyramid_levels = reader.read_u8()?;
-        let sam_enabled = reader.read_u8()? != 0;
-        let max_concurrent_streams = reader.read_u32()?;
-        let model_len = reader.read_u16()? as usize;
-        let sam_model = if model_len > 0 {
-            reader.read_str(model_len)?.to_string()
-        } else {
-            String::new()
-        };
-
-        Some(Self {
-            protocol_version,
-            max_image_size,
-            max_pyramid_levels,
-            sam_enabled,
-            sam_model,
-            max_concurrent_streams,
-        })
-    }
-
-    /// Check if client version is compatible with server.
-    pub fn is_compatible(&self, client_version: u8) -> bool {
-        // For now, require exact match. In the future, we might allow
-        // minor version differences.
-        self.protocol_version == client_version
-    }
 }
 
 /// Error severity level.
@@ -480,6 +380,176 @@ impl Severity {
     }
 }
 
+// ============================================================================
+// Capabilities and Model Definitions
+// ============================================================================
+
+/// Server information.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerInfo {
+    pub name: String,
+    pub version: String,
+}
+
+/// Server resource limits.
+///
+/// These limits can be configured on the server side based on available resources.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerLimits {
+    /// Maximum image file size in bytes (not pixel dimensions).
+    ///
+    /// This limits the raw file size to prevent memory exhaustion, but does not
+    /// restrict image dimensions. Very large hyperspectral images are supported
+    /// through pyramid levels and chunked streaming.
+    ///
+    /// Default: 4GB (4,294,967,296 bytes)
+    pub max_image_size: u64,
+
+    /// Maximum number of pyramid levels for progressive loading.
+    ///
+    /// Default: 8
+    pub max_pyramid_levels: u8,
+
+    /// Maximum concurrent image streams per connection.
+    ///
+    /// Default: 4
+    pub max_concurrent_streams: u32,
+
+    /// Maximum concurrent inference operations per connection.
+    ///
+    /// Default: 2
+    pub max_concurrent_inferences: u32,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            max_image_size: 4 * 1024 * 1024 * 1024, // 4GB
+            max_pyramid_levels: 8,
+            max_concurrent_streams: 4,
+            max_concurrent_inferences: 2,
+        }
+    }
+}
+
+/// Server capabilities sent on WebSocket connect.
+///
+/// This allows clients to discover available models and validate compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ServerCapabilities {
+    /// Protocol version supported by server
+    pub protocol_version: u8,
+
+    /// Server identification
+    pub server: ServerInfo,
+
+    /// Resource limits
+    pub limits: ServerLimits,
+
+    /// Available models
+    pub models: Vec<ModelCapability>,
+}
+
+impl Default for ServerCapabilities {
+    fn default() -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            server: ServerInfo {
+                name: "hvat-axum".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            limits: ServerLimits::default(),
+            models: vec![],
+        }
+    }
+}
+
+impl ServerCapabilities {
+    /// Find a model by type (convenience method).
+    pub fn find_model_by_type(&self, model_type: ModelType) -> Option<&ModelCapability> {
+        self.models.iter().find(|m| m.model_type == model_type)
+    }
+
+    /// Check if a specific model is available.
+    pub fn has_model(&self, model_id: &str) -> bool {
+        self.models.iter().any(|m| m.id == model_id)
+    }
+
+    /// Check if client version is compatible with server.
+    pub fn is_compatible(&self, client_version: u8) -> bool {
+        // For now, require exact match. In the future, we might allow
+        // minor version differences.
+        self.protocol_version == client_version
+    }
+}
+
+/// Model type category for UI hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelType {
+    Segmentation,
+    Detection,
+    Classification,
+    Feature,
+    Custom,
+}
+
+/// Input schema for a model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InputSchema {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub input_type: String,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Output schema for a model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutputSchema {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub output_type: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Option schema for configurable model parameters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct OptionSchema {
+    #[serde(rename = "type")]
+    pub option_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+}
+
+/// Model capability definition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelCapability {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub model_type: ModelType,
+    #[serde(default)]
+    pub description: String,
+    pub inputs: Vec<InputSchema>,
+    pub outputs: Vec<OutputSchema>,
+    #[serde(default)]
+    pub options: HashMap<String, OptionSchema>,
+    #[serde(default)]
+    pub requires_embedding: bool,
+    #[serde(default)]
+    pub embedding_time_ms: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +567,22 @@ mod tests {
         assert_eq!(
             ServerMessageType::from_byte(ServerMessageType::StreamError.to_byte()),
             Some(ServerMessageType::StreamError)
+        );
+        assert_eq!(
+            ServerMessageType::from_byte(ServerMessageType::ImageSet.to_byte()),
+            Some(ServerMessageType::ImageSet)
+        );
+        assert_eq!(
+            ServerMessageType::from_byte(ServerMessageType::ModelReady.to_byte()),
+            Some(ServerMessageType::ModelReady)
+        );
+        assert_eq!(
+            ServerMessageType::from_byte(ServerMessageType::InferProgress.to_byte()),
+            Some(ServerMessageType::InferProgress)
+        );
+        assert_eq!(
+            ServerMessageType::from_byte(ServerMessageType::InferResult.to_byte()),
+            Some(ServerMessageType::InferResult)
         );
     }
 
@@ -516,13 +602,20 @@ mod tests {
             ErrorCode::PyramidNotReady.category(),
             ErrorCategory::Pyramid
         );
-        assert_eq!(ErrorCode::SamNotEnabled.category(), ErrorCategory::Sam);
+        assert_eq!(ErrorCode::ModelNotFound.category(), ErrorCategory::Model);
+        assert_eq!(ErrorCode::NoActiveImage.category(), ErrorCategory::Image);
+        assert_eq!(
+            ErrorCode::EmbeddingRequired.category(),
+            ErrorCategory::Model
+        );
     }
 
     #[test]
     fn test_error_code_retryable() {
         assert!(ErrorCode::PyramidNotReady.default_retryable());
+        assert!(ErrorCode::ModelBusy.default_retryable());
         assert!(!ErrorCode::ImageNotFound.default_retryable());
+        assert!(!ErrorCode::ModelNotFound.default_retryable());
     }
 
     #[test]
@@ -533,48 +626,106 @@ mod tests {
     }
 
     #[test]
-    fn test_capabilities_encode_decode() {
+    fn test_capabilities_default() {
+        let caps = ServerCapabilities::default();
+        assert_eq!(caps.protocol_version, PROTOCOL_VERSION);
+        assert!(caps.models.is_empty());
+        assert_eq!(caps.server.name, "hvat-axum");
+    }
+
+    #[test]
+    fn test_capabilities_find_model() {
+        let mut caps = ServerCapabilities::default();
+        caps.models.push(ModelCapability {
+            id: "sam-base".to_string(),
+            name: "Segment Anything".to_string(),
+            model_type: ModelType::Segmentation,
+            description: "SAM model".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            options: HashMap::new(),
+            requires_embedding: true,
+            embedding_time_ms: 1000,
+        });
+
+        assert!(caps.has_model("sam-base"));
+        assert!(!caps.has_model("yolo-v8"));
+        assert!(caps.find_model_by_type(ModelType::Segmentation).is_some());
+        assert!(caps.find_model_by_type(ModelType::Detection).is_none());
+    }
+
+    #[test]
+    fn test_capabilities_json_roundtrip() {
         let caps = ServerCapabilities {
-            protocol_version: 1,
-            max_image_size: 4 * 1024 * 1024 * 1024,
-            max_pyramid_levels: 8,
-            sam_enabled: true,
-            sam_model: "base-plus".to_string(),
-            max_concurrent_streams: 4,
+            protocol_version: 2,
+            server: ServerInfo {
+                name: "test-server".to_string(),
+                version: "1.0.0".to_string(),
+            },
+            limits: ServerLimits {
+                max_image_size: 1024 * 1024,
+                max_pyramid_levels: 4,
+                max_concurrent_streams: 2,
+                max_concurrent_inferences: 1,
+            },
+            models: vec![ModelCapability {
+                id: "test-model".to_string(),
+                name: "Test Model".to_string(),
+                model_type: ModelType::Detection,
+                description: "A test model".to_string(),
+                inputs: vec![InputSchema {
+                    name: "image".to_string(),
+                    input_type: "image".to_string(),
+                    required: true,
+                    description: "Input image".to_string(),
+                }],
+                outputs: vec![OutputSchema {
+                    name: "boxes".to_string(),
+                    output_type: "bbox_list".to_string(),
+                    description: "Detected boxes".to_string(),
+                }],
+                options: HashMap::new(),
+                requires_embedding: false,
+                embedding_time_ms: 0,
+            }],
         };
 
-        let encoded = caps.encode();
-        assert_eq!(encoded[0], PROTOCOL_VERSION);
-        assert_eq!(encoded[1], ServerMessageType::Capabilities.to_byte());
-
-        // Decode (skip version and type bytes)
-        let decoded = ServerCapabilities::decode(&encoded[2..]).unwrap();
+        let json = serde_json::to_string(&caps).unwrap();
+        let decoded: ServerCapabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, caps);
     }
 
     #[test]
-    fn test_capabilities_without_sam() {
-        let caps = ServerCapabilities::default();
+    fn test_client_message_serialization() {
+        let msg = ClientMessage::SetImage {
+            request_id: 1,
+            image_id: "test".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"action\":\"set_image\""));
+        assert!(json.contains("\"request_id\":1"));
+        assert!(json.contains("\"image_id\":\"test\""));
 
-        let encoded = caps.encode();
-        let decoded = ServerCapabilities::decode(&encoded[2..]).unwrap();
+        let msg = ClientMessage::PrepareModel {
+            request_id: 2,
+            model_id: "sam-base".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"action\":\"prepare_model\""));
 
-        assert!(!decoded.sam_enabled);
-        assert!(decoded.sam_model.is_empty());
-    }
-
-    #[test]
-    fn test_capabilities_with_sam_builder() {
-        let caps = ServerCapabilities::default().with_sam("tiny");
-
-        assert!(caps.sam_enabled);
-        assert_eq!(caps.sam_model, "tiny");
+        let msg = ClientMessage::Infer {
+            request_id: 3,
+            model_id: "sam-base".to_string(),
+            inputs: serde_json::json!({"points": []}),
+            options: serde_json::json!({}),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"action\":\"infer\""));
     }
 
     #[test]
     fn test_capabilities_compatibility() {
         let caps = ServerCapabilities::default();
-
         assert!(caps.is_compatible(PROTOCOL_VERSION));
         assert!(!caps.is_compatible(PROTOCOL_VERSION + 1));
     }

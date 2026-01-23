@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use crate::config::ServerConfig;
+use crate::inference::{ModelRegistry, SamInferenceAdapter};
 use crate::loaders::{ImageLoaderRegistry, NpyLoader, StandardImageLoader};
 use crate::pyramid::{FilesystemStorage, PyramidBuilder, PyramidStorage};
 use crate::sam::{EmbeddingCache, OnnxSamEngine, SamBackend};
@@ -40,6 +41,9 @@ pub struct AppState {
 
     /// Cache for SAM image embeddings
     pub embedding_cache: Arc<EmbeddingCache>,
+
+    /// Model registry for inference backends (Protocol v2)
+    pub model_registry: Option<Arc<ModelRegistry>>,
 
     /// Active WebSocket connection count (atomic for lock-free access)
     pub active_connections: AtomicU64,
@@ -105,6 +109,22 @@ impl AppState {
             None
         };
 
+        // Create model registry and register SAM if enabled
+        let model_registry = if let Some(ref sam_backend) = sam_engine {
+            let mut registry = ModelRegistry::new();
+            let adapter = SamInferenceAdapter::new(
+                sam_backend.clone(),
+                embedding_cache.clone(),
+                "sam-base",
+                format!("Segment Anything ({})", config.sam_variant.name()),
+            );
+            registry.register(adapter);
+            log::info!("Registered SAM model in inference registry");
+            Some(Arc::new(registry))
+        } else {
+            None
+        };
+
         Self {
             config,
             loaders,
@@ -114,6 +134,7 @@ impl AppState {
             pyramid_tasks: RwLock::new(HashMap::new()),
             sam_engine,
             embedding_cache,
+            model_registry,
             active_connections: AtomicU64::new(0),
             connection_id_counter: AtomicU64::new(0),
         }

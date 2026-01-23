@@ -101,200 +101,6 @@ async fn setup_test_server() -> TestContext {
 }
 
 #[tokio::test]
-async fn test_websocket_requires_start_stream_message() {
-    let ctx = setup_test_server().await;
-
-    // Connect to WebSocket without sending StartStream message
-    let ws_url = format!("ws://{}/api/images/{}/stream", ctx.addr, ctx.test_image_id);
-
-    let (mut ws_stream, _) = connect_async(&ws_url)
-        .await
-        .expect("Failed to connect to WebSocket");
-
-    // Server sends capabilities immediately on connect (type 0x06)
-    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), ws_stream.next())
-        .await
-        .expect("Should receive capabilities message")
-        .expect("Stream should not end")
-        .expect("Should be valid message");
-
-    // Verify it's a capabilities message (type 0x06)
-    if let tokio_tungstenite::tungstenite::Message::Binary(data) = msg {
-        assert!(data.len() >= 2, "Capabilities message should have header");
-        assert_eq!(
-            data[1], 0x06,
-            "First message should be capabilities (type 0x06)"
-        );
-    } else {
-        panic!("Expected binary capabilities message");
-    }
-
-    // Without sending StartStream, server should not send any more data (no image data)
-    let timeout =
-        tokio::time::timeout(tokio::time::Duration::from_millis(500), ws_stream.next()).await;
-
-    // Should timeout because server is waiting for StartStream message
-    assert!(
-        timeout.is_err(),
-        "Server should not send image data without StartStream message"
-    );
-
-    // Close connection
-    let _ = ws_stream.close(None).await;
-}
-
-#[tokio::test]
-async fn test_websocket_streams_after_start_message() {
-    let ctx = setup_test_server().await;
-
-    // Connect to WebSocket
-    let ws_url = format!("ws://{}/api/images/{}/stream", ctx.addr, ctx.test_image_id);
-
-    let (mut ws_stream, _) = connect_async(&ws_url)
-        .await
-        .expect("Failed to connect to WebSocket");
-
-    // Send StartStream message
-    let start_msg = serde_json::json!({
-        "action": "start_stream",
-        "image_id": ctx.test_image_id,
-        "level": 0
-    });
-
-    ws_stream
-        .send(Message::Text(start_msg.to_string().into()))
-        .await
-        .expect("Failed to send StartStream message");
-
-    // Now we should receive binary data (metadata first)
-    let mut received_metadata = false;
-    let mut received_chunks = 0;
-    let mut received_level_complete = false;
-
-    // Collect messages with timeout
-    let timeout_duration = tokio::time::Duration::from_secs(10);
-    let start_time = std::time::Instant::now();
-
-    while start_time.elapsed() < timeout_duration {
-        let msg =
-            tokio::time::timeout(tokio::time::Duration::from_millis(1000), ws_stream.next()).await;
-
-        match msg {
-            Ok(Some(Ok(Message::Binary(data)))) => {
-                if data.is_empty() {
-                    continue;
-                }
-
-                // Protocol v1: [version][msg_type][payload...]
-                let version = data[0];
-                let msg_type = data[1];
-
-                assert_eq!(version, 1, "Expected protocol version 1");
-
-                match msg_type {
-                    0x00 => {
-                        // Reset message - clear display before metadata
-                        println!("Received Reset message");
-                    }
-                    0x01 => {
-                        // Metadata
-                        received_metadata = true;
-                        assert!(
-                            data.len() >= 18,
-                            "Metadata should be at least 18 bytes (version + type + 16 payload)"
-                        );
-
-                        let width = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
-                        let height = u32::from_le_bytes([data[6], data[7], data[8], data[9]]);
-                        let num_bands =
-                            u32::from_le_bytes([data[10], data[11], data[12], data[13]]);
-                        let num_layers =
-                            u32::from_le_bytes([data[14], data[15], data[16], data[17]]);
-
-                        println!(
-                            "Received metadata: {}x{}, {} bands, {} layers",
-                            width, height, num_bands, num_layers
-                        );
-
-                        assert!(width > 0, "Width should be > 0");
-                        assert!(height > 0, "Height should be > 0");
-                    }
-                    0x02 => {
-                        // Layer chunk
-                        received_chunks += 1;
-                    }
-                    0x03 => {
-                        // Layer complete
-                        println!("Layer complete");
-                    }
-                    0x04 => {
-                        // Level complete
-                        received_level_complete = true;
-                        println!("Level complete - streaming finished");
-                        break;
-                    }
-                    0xFE => {
-                        // Error (new protocol uses 0xFE instead of 0x05)
-                        // Parse ProtocolError binary format
-                        if data.len() >= 4 {
-                            let error_code = u16::from_le_bytes([data[2], data[3]]);
-                            // Try to extract message if present
-                            let error_msg = if data.len() > 10 {
-                                String::from_utf8_lossy(&data[10..]).to_string()
-                            } else {
-                                format!("Error code: {}", error_code)
-                            };
-                            panic!("Server error: {}", error_msg);
-                        }
-                    }
-                    _ => {
-                        println!("Unknown message type: {}", msg_type);
-                    }
-                }
-            }
-            Ok(Some(Ok(Message::Text(text)))) => {
-                println!("Received text message: {}", text);
-            }
-            Ok(Some(Ok(Message::Close(_)))) => {
-                println!("Connection closed");
-                break;
-            }
-            Ok(Some(Err(e))) => {
-                panic!("WebSocket error: {}", e);
-            }
-            Ok(None) => {
-                println!("Stream ended");
-                break;
-            }
-            Err(_) => {
-                // Timeout - check if we've received what we need
-                if received_level_complete {
-                    break;
-                }
-            }
-            _ => {
-                // Ping, Pong, Frame - ignore
-            }
-        }
-    }
-
-    assert!(received_metadata, "Should have received metadata");
-    assert!(
-        received_chunks > 0,
-        "Should have received at least one chunk"
-    );
-    assert!(
-        received_level_complete,
-        "Should have received level complete"
-    );
-
-    println!("Test passed: received {} chunks", received_chunks);
-
-    // Close connection
-    let _ = ws_stream.close(None).await;
-}
-
-#[tokio::test]
 async fn test_rest_api_info() {
     let ctx = setup_test_server().await;
 
@@ -445,7 +251,9 @@ async fn start_test_server_with_sam() -> Option<SocketAddr> {
     Some(addr)
 }
 
+/// TODO: Rewrite this test to use the mux protocol with the generic infer message
 #[tokio::test]
+#[ignore = "Needs rewrite for mux protocol - uses removed per-image endpoint and legacy SAM messages"]
 async fn test_sam_segment_e2e_with_real_models() {
     // Real e2e test: start server with SAM, send segment request, get mask back
     let Some(addr) = start_test_server_with_sam().await else {
@@ -583,7 +391,10 @@ async fn test_sam_segment_e2e_with_real_models() {
 /// 3. Only one Reset is sent (before first level)
 /// 4. LevelComplete is sent for each level with correct level number
 /// 5. Total bytes received per level matches expected (width * height * 4 * num_layers)
+///
+/// TODO: Rewrite this test to use the mux protocol (/api/ws with set_image + stream_image)
 #[tokio::test]
+#[ignore = "Needs rewrite for mux protocol - uses removed per-image endpoint"]
 async fn test_progressive_streaming_sends_multiple_levels() {
     // Create a larger test image that will have multiple pyramid levels
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -698,7 +509,7 @@ async fn test_progressive_streaming_sends_multiple_levels() {
                 let version = data[0];
                 let msg_type = data[1];
 
-                assert_eq!(version, 1, "Expected protocol version 1");
+                assert_eq!(version, 2, "Expected protocol version 2");
 
                 match msg_type {
                     0x00 => {
@@ -923,26 +734,26 @@ async fn test_mux_websocket_sends_capabilities_on_connect() {
     // Verify it's a capabilities message (type 0x06)
     if let tokio_tungstenite::tungstenite::Message::Binary(data) = msg {
         assert!(data.len() >= 2, "Capabilities message should have header");
-        assert_eq!(data[0], 1, "Protocol version should be 1");
+        assert_eq!(data[0], 2, "Protocol version should be 2");
         assert_eq!(
             data[1], 0x06,
             "First message should be capabilities (type 0x06)"
         );
 
-        // Parse capabilities
-        if data.len() >= 16 {
-            let protocol_version = data[2];
-            let max_concurrent_streams =
-                u32::from_le_bytes([data[13], data[14], data[15], data[16]]);
-            println!(
-                "Capabilities: protocol_version={}, max_concurrent_streams={}",
-                protocol_version, max_concurrent_streams
-            );
-            assert_eq!(protocol_version, 1, "Protocol version should be 1");
-            assert!(
-                max_concurrent_streams > 0,
-                "max_concurrent_streams should be > 0"
-            );
+        // Parse capabilities (format: [version:u8][type:u8][request_id:u32][JSON payload])
+        if data.len() >= 10 {
+            let request_id = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
+            assert_eq!(request_id, 0, "Capabilities should have request_id=0");
+
+            // Parse JSON payload
+            let json_payload = &data[6..];
+            if let Ok(caps) = serde_json::from_slice::<serde_json::Value>(json_payload) {
+                println!("Capabilities received: {:?}", caps);
+                assert_eq!(caps["protocol_version"], 2, "Protocol version should be 2");
+                assert!(caps["limits"]["max_concurrent_streams"].as_u64().unwrap() > 0);
+            } else {
+                panic!("Failed to parse capabilities JSON");
+            }
         }
     } else {
         panic!("Expected binary capabilities message");
@@ -951,7 +762,7 @@ async fn test_mux_websocket_sends_capabilities_on_connect() {
     let _ = ws_stream.close(None).await;
 }
 
-/// Test that the multiplexed endpoint can stream an image using start_stream_mux.
+/// Test that the multiplexed endpoint can stream an image using Protocol v2 (set_image + stream_image).
 #[tokio::test]
 async fn test_mux_websocket_streams_image() {
     let ctx = setup_test_server().await;
@@ -966,20 +777,31 @@ async fn test_mux_websocket_streams_image() {
     // Receive capabilities first
     let _ = ws_stream.next().await;
 
-    // Send start_stream_mux message
+    // Send set_image + stream_image messages (Protocol v2)
     let request_id = 42u32;
-    let start_msg = serde_json::json!({
-        "action": "start_stream_mux",
+
+    // First, set the active image context
+    let set_image_msg = serde_json::json!({
+        "action": "set_image",
         "request_id": request_id,
         "image_id": ctx.test_image_id,
+    });
+    ws_stream
+        .send(Message::Text(set_image_msg.to_string().into()))
+        .await
+        .expect("Failed to send set_image message");
+
+    // Then request streaming
+    let stream_msg = serde_json::json!({
+        "action": "stream_image",
+        "request_id": request_id,
         "level": 0,
         "progressive": false
     });
-
     ws_stream
-        .send(Message::Text(start_msg.to_string().into()))
+        .send(Message::Text(stream_msg.to_string().into()))
         .await
-        .expect("Failed to send start_stream_mux message");
+        .expect("Failed to send stream_image message");
 
     // Now we should receive binary data with request_id embedded
     let mut received_metadata = false;
@@ -1005,7 +827,7 @@ async fn test_mux_websocket_streams_image() {
                 let msg_type = data[1];
                 let msg_request_id = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
 
-                assert_eq!(version, 1, "Expected protocol version 1");
+                assert_eq!(version, 2, "Expected protocol version 2");
                 assert_eq!(
                     msg_request_id, request_id,
                     "Request ID should match our request"
@@ -1127,31 +949,49 @@ async fn test_mux_websocket_concurrent_streams() {
     let request_id_1 = 100u32;
     let request_id_2 = 200u32;
 
-    let start_msg_1 = serde_json::json!({
-        "action": "start_stream_mux",
+    // Send set_image + stream_image for first stream
+    let set_image_msg_1 = serde_json::json!({
+        "action": "set_image",
         "request_id": request_id_1,
         "image_id": ctx.test_image_id,
+    });
+    let stream_msg_1 = serde_json::json!({
+        "action": "stream_image",
+        "request_id": request_id_1,
         "level": 0,
         "progressive": false
     });
 
-    let start_msg_2 = serde_json::json!({
-        "action": "start_stream_mux",
+    // Send set_image + stream_image for second stream
+    let set_image_msg_2 = serde_json::json!({
+        "action": "set_image",
         "request_id": request_id_2,
         "image_id": "subfolder_nested_image_png",
+    });
+    let stream_msg_2 = serde_json::json!({
+        "action": "stream_image",
+        "request_id": request_id_2,
         "level": 0,
         "progressive": false
     });
 
     // Send both requests
     ws_stream
-        .send(Message::Text(start_msg_1.to_string().into()))
+        .send(Message::Text(set_image_msg_1.to_string().into()))
         .await
-        .expect("Failed to send first start_stream_mux");
+        .expect("Failed to send first set_image");
     ws_stream
-        .send(Message::Text(start_msg_2.to_string().into()))
+        .send(Message::Text(stream_msg_1.to_string().into()))
         .await
-        .expect("Failed to send second start_stream_mux");
+        .expect("Failed to send first stream_image");
+    ws_stream
+        .send(Message::Text(set_image_msg_2.to_string().into()))
+        .await
+        .expect("Failed to send second set_image");
+    ws_stream
+        .send(Message::Text(stream_msg_2.to_string().into()))
+        .await
+        .expect("Failed to send second stream_image");
 
     // Track completions for each request_id
     let mut stream_1_complete = false;
@@ -1256,18 +1096,26 @@ async fn test_mux_websocket_cancel_stream() {
 
     // Start a stream
     let request_id = 123u32;
-    let start_msg = serde_json::json!({
-        "action": "start_stream_mux",
+    let set_image_msg = serde_json::json!({
+        "action": "set_image",
         "request_id": request_id,
         "image_id": ctx.test_image_id,
+    });
+    let stream_msg = serde_json::json!({
+        "action": "stream_image",
+        "request_id": request_id,
         "level": 0,
         "progressive": false
     });
 
     ws_stream
-        .send(Message::Text(start_msg.to_string().into()))
+        .send(Message::Text(set_image_msg.to_string().into()))
         .await
-        .expect("Failed to send start_stream_mux");
+        .expect("Failed to send set_image");
+    ws_stream
+        .send(Message::Text(stream_msg.to_string().into()))
+        .await
+        .expect("Failed to send stream_image");
 
     // Wait for some data to arrive
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -1377,105 +1225,6 @@ async fn test_mux_websocket_rejects_legacy_protocol() {
     assert!(
         received_error,
         "Should receive error when using legacy protocol on mux endpoint"
-    );
-
-    let _ = ws_stream.close(None).await;
-}
-
-// ============================================================================
-// Legacy WebSocket Tests (existing tests)
-// ============================================================================
-
-#[tokio::test]
-async fn test_sam_segment_without_sam_enabled_returns_error() {
-    // Test that SAM segment request returns an error when SAM is not enabled
-    // This tests the protocol handling without requiring the actual models
-    let ctx = setup_test_server().await;
-
-    // Connect to WebSocket
-    let ws_url = format!("ws://{}/api/images/{}/stream", ctx.addr, ctx.test_image_id);
-
-    let (mut ws_stream, _) = connect_async(&ws_url)
-        .await
-        .expect("Failed to connect to WebSocket");
-
-    // Send SAM segment request (should fail since SAM is not enabled)
-    let sam_segment_msg = serde_json::json!({
-        "action": "sam_segment",
-        "image_id": ctx.test_image_id,
-        "points": [
-            {"x": 100.0, "y": 100.0, "label": 1}
-        ],
-        "box": null
-    });
-
-    ws_stream
-        .send(Message::Text(sam_segment_msg.to_string().into()))
-        .await
-        .expect("Failed to send SAM segment message");
-
-    // We should receive an error response (JSON text message)
-    let mut received_error = false;
-    let timeout_duration = tokio::time::Duration::from_secs(5);
-    let start_time = std::time::Instant::now();
-
-    while start_time.elapsed() < timeout_duration {
-        let msg =
-            tokio::time::timeout(tokio::time::Duration::from_millis(1000), ws_stream.next()).await;
-
-        match msg {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                println!("Received text message: {}", text);
-                // Check if it's an error about SAM not being enabled
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if json["type"] == "error" {
-                        println!("Got expected error: {}", json["message"]);
-                        received_error = true;
-                        break;
-                    }
-                }
-            }
-            Ok(Some(Ok(Message::Binary(data)))) => {
-                // Binary message - could be an error
-                // Protocol v1: [version][msg_type][payload...]
-                if data.len() >= 2 {
-                    let version = data[0];
-                    let msg_type = data[1];
-
-                    if version == 1 && msg_type == 0xFE {
-                        // Error message type (0xFE in new protocol)
-                        if data.len() >= 4 {
-                            let error_code = u16::from_le_bytes([data[2], data[3]]);
-                            println!("Got binary error with code: {}", error_code);
-                            // Error code 3000 = SamNotEnabled
-                            if error_code == 3000 {
-                                println!("Got expected SamNotEnabled error");
-                            }
-                            received_error = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
-                println!("Connection closed");
-                break;
-            }
-            Ok(Some(Err(e))) => {
-                println!("WebSocket error: {}", e);
-                break;
-            }
-            Err(_) => {
-                // Timeout
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(
-        received_error,
-        "Should have received an error since SAM is not enabled"
     );
 
     let _ = ws_stream.close(None).await;

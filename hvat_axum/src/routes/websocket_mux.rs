@@ -8,7 +8,8 @@
 //!
 //! **Client → Server (JSON text frames):**
 //! ```json
-//! { "action": "start_stream_mux", "request_id": 1, "image_id": "img.png", "level": 0, "progressive": true }
+//! { "action": "set_image", "request_id": 1, "image_id": "img.png" }
+//! { "action": "stream_image", "request_id": 1, "level": 0, "progressive": true }
 //! { "action": "cancel_stream", "request_id": 1 }
 //! { "action": "pong", "timestamp": 123456789 }
 //! ```
@@ -35,9 +36,9 @@ use crate::error::Error;
 use crate::packer::{downsample_bands, pack_bands_to_rgba_layers};
 use crate::protocol::{
     ClientMessage, ErrorCode, PROTOCOL_VERSION, ProtocolError, ServerCapabilities, StreamMetadata,
-    encode_capabilities, encode_layer_chunk_mux, encode_layer_complete_mux,
-    encode_level_complete_mux, encode_ping, encode_reset_mux, encode_stream_complete,
-    encode_stream_error,
+    encode_capabilities_v2, encode_image_set, encode_infer_progress, encode_infer_result,
+    encode_layer_chunk_mux, encode_layer_complete_mux, encode_level_complete_mux,
+    encode_model_ready, encode_ping, encode_reset_mux, encode_stream_complete, encode_stream_error,
 };
 use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::state::AppState;
@@ -51,20 +52,76 @@ struct ActiveStream {
     image_id: String,
 }
 
+/// Cached image data for inference operations.
+struct CachedImageData {
+    image_id: String,
+    rgb_data: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// State for an active inference task.
+struct ActiveInference {
+    /// Task handle for the inference coroutine
+    task: JoinHandle<()>,
+    /// Model ID being used
+    model_id: String,
+}
+
 /// Manages all active streams for a single WebSocket connection.
 struct ConnectionStreams {
     /// Active streams indexed by request_id
     streams: HashMap<u32, ActiveStream>,
+    /// Active inference tasks indexed by request_id
+    inferences: HashMap<u32, ActiveInference>,
     /// Maximum concurrent streams allowed
     max_streams: u32,
+    /// Active image ID (set by SetImage message)
+    active_image_id: Option<String>,
+    /// Cached RGB image data for inference (avoid reloading for each infer call)
+    cached_image: Option<CachedImageData>,
 }
 
 impl ConnectionStreams {
     fn new(max_streams: u32) -> Self {
         Self {
             streams: HashMap::new(),
+            inferences: HashMap::new(),
             max_streams,
+            active_image_id: None,
+            cached_image: None,
         }
+    }
+
+    /// Set the active image context.
+    fn set_image(&mut self, image_id: String) {
+        // Clear cached image if switching to a different image
+        if self.active_image_id.as_ref() != Some(&image_id) {
+            self.cached_image = None;
+        }
+        self.active_image_id = Some(image_id);
+    }
+
+    /// Get the active image ID.
+    fn active_image(&self) -> Option<&str> {
+        self.active_image_id.as_deref()
+    }
+
+    /// Cache RGB image data for inference.
+    fn cache_image(&mut self, image_id: String, rgb_data: Vec<u8>, width: u32, height: u32) {
+        self.cached_image = Some(CachedImageData {
+            image_id,
+            rgb_data,
+            width,
+            height,
+        });
+    }
+
+    /// Get cached image data if available and matches the image_id.
+    fn get_cached_image(&self, image_id: &str) -> Option<&CachedImageData> {
+        self.cached_image
+            .as_ref()
+            .filter(|c| c.image_id == image_id)
     }
 
     /// Check if we can start a new stream.
@@ -108,6 +165,39 @@ impl ConnectionStreams {
     /// Get the number of active streams.
     fn len(&self) -> usize {
         self.streams.len()
+    }
+
+    /// Register a new inference task.
+    fn insert_inference(&mut self, request_id: u32, inference: ActiveInference) {
+        self.inferences.insert(request_id, inference);
+    }
+
+    /// Cancel and remove an inference task by request_id.
+    fn cancel_inference(&mut self, request_id: u32) -> bool {
+        if let Some(inference) = self.inferences.remove(&request_id) {
+            inference.task.abort();
+            tracing::info!(
+                "Cancelled inference {} for model '{}'",
+                request_id,
+                inference.model_id
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a completed inference task (without aborting).
+    fn remove_inference(&mut self, request_id: u32) {
+        self.inferences.remove(&request_id);
+    }
+
+    /// Cancel all active inference tasks.
+    fn cancel_all_inferences(&mut self) {
+        for (request_id, inference) in self.inferences.drain() {
+            inference.task.abort();
+            tracing::debug!("Cancelled inference {} (connection closing)", request_id);
+        }
     }
 }
 
@@ -188,7 +278,7 @@ async fn handle_websocket_mux_inner(
 
     // Build and send server capabilities immediately
     let capabilities = build_server_capabilities(&state);
-    let capabilities_bytes = encode_capabilities(&capabilities);
+    let capabilities_bytes = encode_capabilities_v2(&capabilities);
 
     // Spawn task to forward messages to WebSocket
     let connection_alive_send = connection_alive.clone();
@@ -329,8 +419,10 @@ async fn handle_websocket_mux_inner(
     // Signal shutdown
     connection_alive.store(false, Ordering::SeqCst);
 
-    // Cancel all active streams
-    streams.write().await.cancel_all();
+    // Cancel all active streams and inferences
+    let mut streams_guard = streams.write().await;
+    streams_guard.cancel_all();
+    streams_guard.cancel_all_inferences();
 
     // Clean up
     drop(tx);
@@ -351,12 +443,56 @@ async fn handle_mux_message(
     connection_id: u64,
 ) {
     match msg {
-        ClientMessage::StartStreamMux {
+        // ====================================================================
+        // Image Context
+        // ====================================================================
+        ClientMessage::SetImage {
             request_id,
             image_id,
+        } => {
+            tracing::info!(
+                "Mux connection {}: set_image {} (request_id={})",
+                connection_id,
+                image_id,
+                request_id
+            );
+
+            // Set the active image
+            streams.write().await.set_image(image_id.clone());
+
+            // Send confirmation
+            let msg = encode_image_set(request_id, &image_id);
+            let _ = tx.send(Message::Binary(msg.into())).await;
+        }
+
+        // ====================================================================
+        // Streaming
+        // ====================================================================
+        ClientMessage::StreamImage {
+            request_id,
             level,
             progressive,
         } => {
+            // Get the active image ID
+            let image_id = {
+                let streams_guard = streams.read().await;
+                match streams_guard.active_image() {
+                    Some(id) => id.to_string(),
+                    None => {
+                        let error = ProtocolError::error(
+                            ErrorCode::NoActiveImage,
+                            "No active image set. Call set_image first.",
+                        );
+                        let _ = tx
+                            .send(Message::Binary(
+                                encode_stream_error(request_id, &error).into(),
+                            ))
+                            .await;
+                        return;
+                    }
+                }
+            };
+
             // Check if we can start a new stream
             {
                 let streams_guard = streams.read().await;
@@ -379,10 +515,10 @@ async fn handle_mux_message(
             }
 
             tracing::info!(
-                "Mux connection {}: starting stream {} for '{}' (level={}, progressive={})",
+                "Mux connection {}: stream_image {} (request_id={}, level={}, progressive={})",
                 connection_id,
-                request_id,
                 image_id,
+                request_id,
                 level,
                 progressive
             );
@@ -422,32 +558,503 @@ async fn handle_mux_message(
             }
         }
 
-        // Legacy messages - not supported on multiplexed endpoint
-        ClientMessage::StartStream { .. } | ClientMessage::Cancel => {
-            let error = ProtocolError::error(
-                ErrorCode::InvalidAction,
-                "Legacy protocol not supported on this endpoint. Use start_stream_mux instead.",
-            );
-            let _ = tx
-                .send(Message::Binary(encode_stream_error(0, &error).into()))
-                .await;
+        // ====================================================================
+        // Model Inference
+        // ====================================================================
+        ClientMessage::PrepareModel {
+            request_id,
+            model_id,
+        } => {
+            handle_prepare_model(state, streams, tx, request_id, model_id, connection_id).await;
         }
 
-        // SAM messages - use request_id = 0 for now (TODO: add request_id to SAM)
-        ClientMessage::SamEmbed | ClientMessage::SamSegment { .. } => {
-            let error = ProtocolError::error(
-                ErrorCode::InvalidAction,
-                "SAM operations not yet supported on multiplexed endpoint",
-            );
-            let _ = tx
-                .send(Message::Binary(encode_stream_error(0, &error).into()))
+        ClientMessage::Infer {
+            request_id,
+            model_id,
+            inputs,
+            options,
+        } => {
+            // Spawn inference as a tracked task so it can be cancelled
+            let state_clone = state.clone();
+            let streams_clone = streams.clone();
+            let tx_clone = tx.clone();
+            let model_id_for_tracking = model_id.clone();
+
+            let task = tokio::spawn(async move {
+                handle_infer(
+                    state_clone,
+                    streams_clone.clone(),
+                    tx_clone,
+                    request_id,
+                    model_id,
+                    inputs,
+                    options,
+                    connection_id,
+                )
                 .await;
+
+                // Remove from tracking when complete
+                streams_clone.write().await.remove_inference(request_id);
+            });
+
+            // Track the inference task
+            streams.write().await.insert_inference(
+                request_id,
+                ActiveInference {
+                    task,
+                    model_id: model_id_for_tracking,
+                },
+            );
+        }
+
+        ClientMessage::CancelInfer { request_id } => {
+            tracing::info!(
+                "Mux connection {}: cancel_infer (request_id={})",
+                connection_id,
+                request_id
+            );
+            // Cancel the inference task if it exists
+            let cancelled = streams.write().await.cancel_inference(request_id);
+            if cancelled {
+                tracing::debug!("Inference task {} cancelled successfully", request_id);
+            } else {
+                tracing::debug!(
+                    "Inference task {} not found (may have already completed)",
+                    request_id
+                );
+            }
         }
 
         ClientMessage::Pong { .. } => {
             // Handled in the main receive loop
         }
     }
+}
+
+/// Handle prepare_model request.
+async fn handle_prepare_model(
+    state: Arc<AppState>,
+    streams: Arc<RwLock<ConnectionStreams>>,
+    tx: mpsc::Sender<Message>,
+    request_id: u32,
+    model_id: String,
+    connection_id: u64,
+) {
+    tracing::info!(
+        "Mux connection {}: prepare_model {} (request_id={})",
+        connection_id,
+        model_id,
+        request_id
+    );
+
+    // Get model registry
+    let registry = match state.model_registry.as_ref() {
+        Some(r) => r.clone(),
+        None => {
+            let error = ProtocolError::error(
+                ErrorCode::ModelNotFound,
+                "No models available on this server",
+            );
+            let _ = tx
+                .send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
+    // Get the backend
+    let backend = match registry.get(&model_id) {
+        Some(b) => b,
+        None => {
+            let error = ProtocolError::error(
+                ErrorCode::ModelNotFound,
+                format!("Model '{}' not found", model_id),
+            );
+            let _ = tx
+                .send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
+    // Get active image
+    let image_id = {
+        let streams_guard = streams.read().await;
+        match streams_guard.active_image() {
+            Some(id) => id.to_string(),
+            None => {
+                let error = ProtocolError::error(
+                    ErrorCode::NoActiveImage,
+                    "No active image set. Call set_image first.",
+                );
+                let _ = tx
+                    .send(Message::Binary(
+                        encode_stream_error(request_id, &error).into(),
+                    ))
+                    .await;
+                return;
+            }
+        }
+    };
+
+    // Load RGB image data if not cached
+    let (rgb_data, width, height) = {
+        let streams_guard = streams.read().await;
+        if let Some(cached) = streams_guard.get_cached_image(&image_id) {
+            (cached.rgb_data.clone(), cached.width, cached.height)
+        } else {
+            drop(streams_guard);
+            // Load image
+            match load_image_rgb(&state, &image_id).await {
+                Ok((rgb, w, h)) => {
+                    // Cache it
+                    streams
+                        .write()
+                        .await
+                        .cache_image(image_id.clone(), rgb.clone(), w, h);
+                    (rgb, w, h)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load image '{}': {}", image_id, e);
+                    let error = ProtocolError::error(
+                        ErrorCode::ImageNotFound,
+                        format!("Failed to load image: {}", e),
+                    );
+                    let _ = tx
+                        .send(Message::Binary(
+                            encode_stream_error(request_id, &error).into(),
+                        ))
+                        .await;
+                    return;
+                }
+            }
+        }
+    };
+
+    // Prepare embedding
+    let image_context = crate::inference::ImageContext {
+        image_id: image_id.clone(),
+        rgb_data,
+        width,
+        height,
+    };
+
+    let progress_tx = tx.clone();
+    let progress_cb = Some(Box::new(move |progress: u8, status: &str| {
+        let msg = encode_infer_progress(request_id, progress, status);
+        let _ = progress_tx.try_send(Message::Binary(msg.into()));
+    }) as crate::inference::ProgressCallback);
+
+    match backend.prepare(&image_context, progress_cb).await {
+        Ok(()) => {
+            let msg = encode_model_ready(request_id, &model_id);
+            let _ = tx.send(Message::Binary(msg.into())).await;
+            tracing::info!(
+                "Mux connection {}: model {} ready for '{}'",
+                connection_id,
+                model_id,
+                image_id
+            );
+        }
+        Err(e) => {
+            tracing::error!("Model prepare failed: {}", e);
+            let error = ProtocolError::error(
+                ErrorCode::ModelEncodeFailed,
+                format!("Failed to prepare model: {}", e),
+            );
+            let _ = tx
+                .send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await;
+        }
+    }
+}
+
+/// Handle infer request.
+async fn handle_infer(
+    state: Arc<AppState>,
+    streams: Arc<RwLock<ConnectionStreams>>,
+    tx: mpsc::Sender<Message>,
+    request_id: u32,
+    model_id: String,
+    inputs: serde_json::Value,
+    options: serde_json::Value,
+    connection_id: u64,
+) {
+    tracing::debug!(
+        "Mux connection {}: infer {} (request_id={})",
+        connection_id,
+        model_id,
+        request_id
+    );
+
+    // Get model registry
+    let registry = match state.model_registry.as_ref() {
+        Some(r) => r.clone(),
+        None => {
+            let error = ProtocolError::error(
+                ErrorCode::ModelNotFound,
+                "No models available on this server",
+            );
+            let _ = tx
+                .send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
+    // Get the backend
+    let backend = match registry.get(&model_id) {
+        Some(b) => b,
+        None => {
+            let error = ProtocolError::error(
+                ErrorCode::ModelNotFound,
+                format!("Model '{}' not found", model_id),
+            );
+            let _ = tx
+                .send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
+    // Validate inputs
+    if let Err(e) = backend.validate_inputs(&inputs) {
+        let error = ProtocolError::error(ErrorCode::InvalidInput, format!("Invalid inputs: {}", e));
+        let _ = tx
+            .send(Message::Binary(
+                encode_stream_error(request_id, &error).into(),
+            ))
+            .await;
+        return;
+    }
+
+    // Get active image
+    let image_id = {
+        let streams_guard = streams.read().await;
+        match streams_guard.active_image() {
+            Some(id) => id.to_string(),
+            None => {
+                let error = ProtocolError::error(
+                    ErrorCode::NoActiveImage,
+                    "No active image set. Call set_image first.",
+                );
+                let _ = tx
+                    .send(Message::Binary(
+                        encode_stream_error(request_id, &error).into(),
+                    ))
+                    .await;
+                return;
+            }
+        }
+    };
+
+    // Check if model requires embedding and if it's ready
+    if backend.requires_embedding() && !backend.is_prepared(&image_id).await {
+        let error = ProtocolError::error(
+            ErrorCode::EmbeddingRequired,
+            "Model embedding not ready. Call prepare_model first.",
+        );
+        let _ = tx
+            .send(Message::Binary(
+                encode_stream_error(request_id, &error).into(),
+            ))
+            .await;
+        return;
+    }
+
+    // Get cached image data (width/height needed even if model uses embeddings)
+    let (rgb_data, width, height) = {
+        let streams_guard = streams.read().await;
+        if let Some(cached) = streams_guard.get_cached_image(&image_id) {
+            (cached.rgb_data.clone(), cached.width, cached.height)
+        } else {
+            drop(streams_guard);
+            // Load image
+            match load_image_rgb(&state, &image_id).await {
+                Ok((rgb, w, h)) => {
+                    // Cache it
+                    streams
+                        .write()
+                        .await
+                        .cache_image(image_id.clone(), rgb.clone(), w, h);
+                    (rgb, w, h)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load image '{}': {}", image_id, e);
+                    let error = ProtocolError::error(
+                        ErrorCode::ImageNotFound,
+                        format!("Failed to load image: {}", e),
+                    );
+                    let _ = tx
+                        .send(Message::Binary(
+                            encode_stream_error(request_id, &error).into(),
+                        ))
+                        .await;
+                    return;
+                }
+            }
+        }
+    };
+
+    // Run inference
+    let image_context = crate::inference::ImageContext {
+        image_id: image_id.clone(),
+        rgb_data,
+        width,
+        height,
+    };
+
+    let progress_tx = tx.clone();
+    let progress_cb = Some(Box::new(move |progress: u8, status: &str| {
+        let msg = encode_infer_progress(request_id, progress, status);
+        let _ = progress_tx.try_send(Message::Binary(msg.into()));
+    }) as crate::inference::ProgressCallback);
+
+    match backend
+        .infer(&image_context, inputs, options, progress_cb)
+        .await
+    {
+        Ok(result) => {
+            // Serialize result to JSON
+            let result_json = serde_json::json!({
+                "model_id": result.model_id,
+                "outputs": result.outputs,
+                "timing_ms": result.timing_ms,
+            });
+
+            let json_str = serde_json::to_string(&result_json).unwrap();
+            let msg = encode_infer_result(request_id, &json_str);
+            let _ = tx.send(Message::Binary(msg.into())).await;
+
+            tracing::debug!(
+                "Mux connection {}: inference complete ({}ms)",
+                connection_id,
+                result.timing_ms
+            );
+        }
+        Err(e) => {
+            tracing::error!("Inference failed: {}", e);
+            let error = ProtocolError::error(
+                ErrorCode::ModelDecodeFailed,
+                format!("Inference failed: {}", e),
+            );
+            let _ = tx
+                .send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await;
+        }
+    }
+}
+
+/// Spawn a tracked pyramid build task.
+///
+/// The task is registered in `AppState::pyramid_tasks` so it can be:
+/// - Detected to avoid duplicate builds for the same image
+/// - Cancelled if needed (future enhancement)
+/// - Cleaned up when complete
+async fn spawn_pyramid_task(state: Arc<AppState>, image_path: &Path, image_hash: &str) {
+    let builder = state.pyramid_builder.clone();
+    let storage = state.pyramid_storage.clone();
+    let loaders = state.loaders.clone();
+    let path = image_path.to_path_buf();
+    let hash = image_hash.to_string();
+    let hash_for_insert = hash.clone();
+    let state_for_cleanup = state.clone();
+
+    let handle = tokio::spawn(async move {
+        tracing::info!("Starting pyramid generation for {}", hash);
+
+        if let Some(loader) = loaders.find_loader(&path) {
+            match loader.load_bands(&path).await {
+                Ok(bands) => {
+                    if let Err(e) = builder.build_and_save(&hash, &bands).await {
+                        tracing::error!("Failed to build pyramid: {}", e);
+                        let _ = storage.mark_failed(&hash, &e.to_string()).await;
+                    } else {
+                        tracing::info!("Pyramid {} built successfully", hash);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load bands for pyramid: {}", e);
+                    let _ = storage.mark_failed(&hash, &e.to_string()).await;
+                }
+            }
+        }
+
+        // Clean up: remove ourselves from the task registry
+        state_for_cleanup.pyramid_tasks.write().await.remove(&hash);
+    });
+
+    // Register the task
+    state
+        .pyramid_tasks
+        .write()
+        .await
+        .insert(hash_for_insert, handle);
+}
+
+/// Load RGB image data for inference.
+async fn load_image_rgb(state: &AppState, image_id: &str) -> Result<(Vec<u8>, u32, u32), Error> {
+    let image_path = find_image(state, image_id)?;
+
+    // For hyperspectral images, we need to extract RGB bands
+    let loader = state
+        .loaders
+        .find_loader(&image_path)
+        .ok_or_else(|| Error::UnsupportedFormat(image_id.to_string()))?;
+
+    let bands = loader.load_bands(&image_path).await?;
+
+    // Extract first 3 bands as RGB (or single band as grayscale)
+    let width = bands.width;
+    let height = bands.height;
+    let pixel_count = (width * height) as usize;
+
+    let rgb_data = if bands.num_bands() >= 3 {
+        // Use first 3 bands as RGB
+        let r = &bands.bands[0];
+        let g = &bands.bands[1];
+        let b = &bands.bands[2];
+
+        let mut rgb = Vec::with_capacity(pixel_count * 3);
+        for i in 0..pixel_count {
+            // Convert f32 [0.0, 1.0] to u8 [0, 255]
+            rgb.push((r[i].clamp(0.0, 1.0) * 255.0) as u8);
+            rgb.push((g[i].clamp(0.0, 1.0) * 255.0) as u8);
+            rgb.push((b[i].clamp(0.0, 1.0) * 255.0) as u8);
+        }
+        rgb
+    } else if bands.num_bands() == 1 {
+        // Grayscale - replicate to RGB
+        let gray = &bands.bands[0];
+        let mut rgb = Vec::with_capacity(pixel_count * 3);
+        for &pixel in gray {
+            // Convert f32 [0.0, 1.0] to u8 [0, 255]
+            let byte = (pixel.clamp(0.0, 1.0) * 255.0) as u8;
+            rgb.push(byte);
+            rgb.push(byte);
+            rgb.push(byte);
+        }
+        rgb
+    } else {
+        return Err(Error::Internal(format!(
+            "Image has {} bands, expected 1 or 3+",
+            bands.num_bands()
+        )));
+    };
+
+    Ok((rgb_data, width, height))
 }
 
 /// Spawn a task to stream an image.
@@ -631,8 +1238,7 @@ async fn stream_level_mux(
             // Stream from source and trigger pyramid build
             if pyramid_status == PyramidStatus::Pending || pyramid_status == PyramidStatus::Failed {
                 if !state.pyramid_tasks.read().await.contains_key(image_hash) {
-                    super::websocket::spawn_pyramid_task(state.clone(), image_path, image_hash)
-                        .await;
+                    spawn_pyramid_task(state.clone(), image_path, image_hash).await;
                 }
             }
 
@@ -853,16 +1459,24 @@ fn current_timestamp_ms() -> u64 {
 
 /// Build server capabilities.
 fn build_server_capabilities(state: &AppState) -> ServerCapabilities {
+    use hvat_common::{ServerInfo, ServerLimits};
+
     ServerCapabilities {
         protocol_version: PROTOCOL_VERSION,
-        max_image_size: state.config.max_cache_memory,
-        max_pyramid_levels: hvat_common::MAX_PYRAMID_LEVEL,
-        sam_enabled: state.sam_engine.is_some(),
-        sam_model: if state.sam_engine.is_some() {
-            state.config.sam_variant.name().to_string()
-        } else {
-            String::new()
+        server: ServerInfo {
+            name: "hvat-axum".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
         },
-        max_concurrent_streams: state.config.max_user_streams as u32,
+        limits: ServerLimits {
+            max_image_size: state.config.max_cache_memory,
+            max_pyramid_levels: hvat_common::MAX_PYRAMID_LEVEL,
+            max_concurrent_streams: state.config.max_user_streams as u32,
+            max_concurrent_inferences: 2, // TODO: Make configurable
+        },
+        models: if let Some(ref registry) = state.model_registry {
+            registry.capabilities()
+        } else {
+            vec![]
+        },
     }
 }

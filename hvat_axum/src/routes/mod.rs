@@ -2,7 +2,6 @@
 
 mod images;
 mod projects;
-pub mod websocket;
 mod websocket_mux;
 
 use std::sync::Arc;
@@ -18,8 +17,7 @@ use crate::state::AppState;
 /// - `GET /api/info` - Server/project information
 /// - `GET /api/images` - List all images (for tree display)
 /// - `GET /api/images/:id/meta` - Image metadata
-/// - `WS /api/images/:id/stream` - WebSocket streaming (legacy, per-image)
-/// - `WS /api/ws` - Multiplexed WebSocket streaming (new, single connection)
+/// - `WS /api/ws` - Multiplexed WebSocket streaming
 pub fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         // Server info and image listing from projects module
