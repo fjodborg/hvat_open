@@ -19,3 +19,5 @@ serve = "run --profile release-dev -p hvat_axum -- --data-dir hvat_visual_tests/
 serve-sam = "run --profile release-dev -p hvat_axum -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
 # Run hvat_axum in debug mode
 serve-debug = "run -p hvat_axum -- --data-dir hvat_visual_tests/test_input"
+# Run hvat_axum with short ping intervals for testing keepalive
+serve-test-keepalive = "run --profile release-dev -p hvat_axum -- --data-dir hvat_visual_tests/test_input --ping-interval 5 --connection-timeout 15 --max-connections 3"
