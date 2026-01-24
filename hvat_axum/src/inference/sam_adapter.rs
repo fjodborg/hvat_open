@@ -167,10 +167,18 @@ impl<B: SamBackend + ?Sized + 'static> InferenceBackend for SamInferenceAdapter<
             cb(100, "Complete");
         }
 
+        // Flatten polygons to match protocol: [[x1,y1,x2,y2,...], ...]
+        // Server has Vec<Vec<[f32; 2]>>, protocol expects Vec<Vec<f32>>
+        let flattened_masks: Vec<Vec<f32>> = result
+            .polygons
+            .into_iter()
+            .map(|polygon| polygon.into_iter().flat_map(|[x, y]| [x, y]).collect())
+            .collect();
+
         Ok(InferenceResult {
             model_id: self.model_id.clone(),
             outputs: json!({
-                "masks": result.polygons,
+                "masks": flattened_masks,
                 "scores": result.iou_scores,
             }),
             timing_ms,
