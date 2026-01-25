@@ -15,8 +15,12 @@ use hvat_axum::{AppState, ServerConfig, routes};
 
 /// Test context that holds temporary directories and server address.
 struct TestContext {
-    _temp_dir: TempDir,
-    _cache_dir: TempDir,
+    /// Temp dir for test data. Must be kept alive - dropping it deletes the directory.
+    /// Compiler warns "never read" but the Drop impl needs it to persist.
+    temp_dir: TempDir,
+    /// Cache dir for pyramids. Must be kept alive - dropping it deletes the directory.
+    /// Compiler warns "never read" but the Drop impl needs it to persist.
+    cache_dir: TempDir,
     addr: SocketAddr,
     /// Image ID for testing (URL-safe version of filename)
     test_image_id: String,
@@ -93,8 +97,8 @@ async fn setup_test_server() -> TestContext {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     TestContext {
-        _temp_dir: temp_dir,
-        _cache_dir: cache_dir,
+        temp_dir: temp_dir,
+        cache_dir: cache_dir,
         addr,
         test_image_id: "test_image_png".to_string(),
     }
@@ -188,7 +192,7 @@ async fn test_sam_enabled_but_models_missing_should_error() {
     };
 
     // This should panic with a clear error about missing models
-    let _state = Arc::new(AppState::new(config));
+    Arc::new(AppState::new(config));
 }
 
 /// Start a test server with SAM enabled (requires models in .cache/models).
@@ -359,7 +363,7 @@ async fn test_sam_segment_e2e_with_real_models() {
         }
     }
 
-    let _ = ws_stream.close(None).await;
+    ws_stream.close(None).await.ok(); // Test cleanup - ignore close errors
 
     // Assertions
     assert!(
@@ -622,7 +626,7 @@ async fn test_progressive_streaming_sends_multiple_levels() {
         }
     }
 
-    let _ = ws_stream.close(None).await;
+    ws_stream.close(None).await.ok(); // Test cleanup - ignore close errors
 
     // Assertions
     assert!(
@@ -759,7 +763,7 @@ async fn test_mux_websocket_sends_capabilities_on_connect() {
         panic!("Expected binary capabilities message");
     }
 
-    let _ = ws_stream.close(None).await;
+    ws_stream.close(None).await.ok(); // Test cleanup - ignore close errors
 }
 
 /// Test that the multiplexed endpoint can stream an image using Protocol v2 (set_image + stream_image).
@@ -775,7 +779,7 @@ async fn test_mux_websocket_streams_image() {
         .expect("Failed to connect to multiplexed WebSocket");
 
     // Receive capabilities first
-    let _ = ws_stream.next().await;
+    ws_stream.next().await;
 
     // Send set_image + stream_image messages (Protocol v2)
     let request_id = 42u32;
@@ -927,7 +931,7 @@ async fn test_mux_websocket_streams_image() {
         received_chunks
     );
 
-    let _ = ws_stream.close(None).await;
+    ws_stream.close(None).await.ok(); // Test cleanup - ignore close errors
 }
 
 /// Test that multiple concurrent streams work on the multiplexed endpoint.
@@ -943,7 +947,7 @@ async fn test_mux_websocket_concurrent_streams() {
         .expect("Failed to connect to multiplexed WebSocket");
 
     // Receive capabilities first
-    let _ = ws_stream.next().await;
+    ws_stream.next().await;
 
     // Start two streams with different request_ids
     let request_id_1 = 100u32;
@@ -1076,7 +1080,7 @@ async fn test_mux_websocket_concurrent_streams() {
         stream_1_chunks, stream_2_chunks
     );
 
-    let _ = ws_stream.close(None).await;
+    ws_stream.close(None).await.ok(); // Test cleanup - ignore close errors
 }
 
 /// Test that cancel_stream works on the multiplexed endpoint.
@@ -1092,7 +1096,7 @@ async fn test_mux_websocket_cancel_stream() {
         .expect("Failed to connect to multiplexed WebSocket");
 
     // Receive capabilities first
-    let _ = ws_stream.next().await;
+    ws_stream.next().await;
 
     // Start a stream
     let request_id = 123u32;
@@ -1166,7 +1170,7 @@ async fn test_mux_websocket_cancel_stream() {
         received_stream_complete
     );
 
-    let _ = ws_stream.close(None).await;
+    ws_stream.close(None).await.ok(); // Test cleanup - ignore close errors
 }
 
 /// Test that legacy protocol messages are rejected on the multiplexed endpoint.
@@ -1182,7 +1186,7 @@ async fn test_mux_websocket_rejects_legacy_protocol() {
         .expect("Failed to connect to multiplexed WebSocket");
 
     // Receive capabilities first
-    let _ = ws_stream.next().await;
+    ws_stream.next().await;
 
     // Send legacy start_stream message (without request_id)
     let legacy_msg = serde_json::json!({
@@ -1227,5 +1231,5 @@ async fn test_mux_websocket_rejects_legacy_protocol() {
         "Should receive error when using legacy protocol on mux endpoint"
     );
 
-    let _ = ws_stream.close(None).await;
+    ws_stream.close(None).await.ok(); // Test cleanup - ignore close errors
 }

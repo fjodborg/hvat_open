@@ -123,6 +123,10 @@ impl<B: SamBackend + ?Sized + 'static> InferenceBackend for SamInferenceAdapter<
         &self,
         image: &ImageContext,
         inputs: Value,
+        // `_options` is part of the InferenceBackend trait signature (required by PROTOCOL.md).
+        // SAM currently doesn't use options (like "multimask"), but the protocol mandates this
+        // parameter for all models. Future models (YOLO, etc.) will use it. The underscore
+        // indicates SAM-specific implementation doesn't need it, not that the trait shouldn't have it.
         _options: Value,
         progress: Option<ProgressCallback>,
     ) -> anyhow::Result<InferenceResult> {

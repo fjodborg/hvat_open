@@ -220,10 +220,12 @@ pub async fn handle_websocket_mux(socket: WebSocket, state: Arc<AppState>) {
                 ),
                 5000,
             );
-            let _ = sender
+            // If sending the error fails, client is likely already disconnected - nothing to do
+            sender
                 .send(Message::Binary(encode_stream_error(0, &error).into()))
-                .await;
-            let _ = sender.close().await;
+                .await
+                .ok();
+            sender.close().await.ok();
             tracing::warn!(
                 "Rejected multiplexed connection: max connections ({}) reached",
                 state.config.max_connections
@@ -393,9 +395,10 @@ async fn handle_websocket_mux_inner(
                                 ErrorCode::InvalidRequest,
                                 format!("Invalid message: {}", e),
                             );
-                            let _ = tx
-                                .send(Message::Binary(encode_stream_error(0, &error).into()))
-                                .await;
+                            // Ignore send errors - client likely disconnected
+                            tx.send(Message::Binary(encode_stream_error(0, &error).into()))
+                                .await
+                                .ok();
                         }
                     }
                 }
@@ -426,7 +429,7 @@ async fn handle_websocket_mux_inner(
 
     // Clean up
     drop(tx);
-    let _ = send_task.await;
+    send_task.await.ok();
     if let Some(ping_task) = ping_task {
         ping_task.abort();
     }
@@ -462,7 +465,7 @@ async fn handle_mux_message(
 
             // Send confirmation
             let msg = encode_image_set(request_id, &image_id);
-            let _ = tx.send(Message::Binary(msg.into())).await;
+            tx.send(Message::Binary(msg.into())).await.ok();
         }
 
         // ====================================================================
@@ -483,11 +486,11 @@ async fn handle_mux_message(
                             ErrorCode::NoActiveImage,
                             "No active image set. Call set_image first.",
                         );
-                        let _ = tx
-                            .send(Message::Binary(
-                                encode_stream_error(request_id, &error).into(),
-                            ))
-                            .await;
+                        tx.send(Message::Binary(
+                            encode_stream_error(request_id, &error).into(),
+                        ))
+                        .await
+                        .ok();
                         return;
                     }
                 }
@@ -505,11 +508,11 @@ async fn handle_mux_message(
                         ),
                         1000,
                     );
-                    let _ = tx
-                        .send(Message::Binary(
-                            encode_stream_error(request_id, &error).into(),
-                        ))
-                        .await;
+                    tx.send(Message::Binary(
+                        encode_stream_error(request_id, &error).into(),
+                    ))
+                    .await
+                    .ok();
                     return;
                 }
             }
@@ -655,11 +658,11 @@ async fn handle_prepare_model(
                 ErrorCode::ModelNotFound,
                 "No models available on this server",
             );
-            let _ = tx
-                .send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await;
+            tx.send(Message::Binary(
+                encode_stream_error(request_id, &error).into(),
+            ))
+            .await
+            .ok();
             return;
         }
     };
@@ -672,11 +675,11 @@ async fn handle_prepare_model(
                 ErrorCode::ModelNotFound,
                 format!("Model '{}' not found", model_id),
             );
-            let _ = tx
-                .send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await;
+            tx.send(Message::Binary(
+                encode_stream_error(request_id, &error).into(),
+            ))
+            .await
+            .ok();
             return;
         }
     };
@@ -691,11 +694,11 @@ async fn handle_prepare_model(
                     ErrorCode::NoActiveImage,
                     "No active image set. Call set_image first.",
                 );
-                let _ = tx
-                    .send(Message::Binary(
-                        encode_stream_error(request_id, &error).into(),
-                    ))
-                    .await;
+                tx.send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await
+                .ok();
                 return;
             }
         }
@@ -724,11 +727,11 @@ async fn handle_prepare_model(
                         ErrorCode::ImageNotFound,
                         format!("Failed to load image: {}", e),
                     );
-                    let _ = tx
-                        .send(Message::Binary(
-                            encode_stream_error(request_id, &error).into(),
-                        ))
-                        .await;
+                    tx.send(Message::Binary(
+                        encode_stream_error(request_id, &error).into(),
+                    ))
+                    .await
+                    .ok();
                     return;
                 }
             }
@@ -746,13 +749,15 @@ async fn handle_prepare_model(
     let progress_tx = tx.clone();
     let progress_cb = Some(Box::new(move |progress: u8, status: &str| {
         let msg = encode_infer_progress(request_id, progress, status);
-        let _ = progress_tx.try_send(Message::Binary(msg.into()));
+        // try_send is non-blocking - if channel is full, progress update is dropped.
+        // This is acceptable because progress updates are non-critical telemetry.
+        progress_tx.try_send(Message::Binary(msg.into())).ok();
     }) as crate::inference::ProgressCallback);
 
     match backend.prepare(&image_context, progress_cb).await {
         Ok(()) => {
             let msg = encode_model_ready(request_id, &model_id);
-            let _ = tx.send(Message::Binary(msg.into())).await;
+            tx.send(Message::Binary(msg.into())).await.ok();
             tracing::info!(
                 "Mux connection {}: model {} ready for '{}'",
                 connection_id,
@@ -766,11 +771,11 @@ async fn handle_prepare_model(
                 ErrorCode::ModelEncodeFailed,
                 format!("Failed to prepare model: {}", e),
             );
-            let _ = tx
-                .send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await;
+            tx.send(Message::Binary(
+                encode_stream_error(request_id, &error).into(),
+            ))
+            .await
+            .ok();
         }
     }
 }
@@ -801,11 +806,11 @@ async fn handle_infer(
                 ErrorCode::ModelNotFound,
                 "No models available on this server",
             );
-            let _ = tx
-                .send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await;
+            tx.send(Message::Binary(
+                encode_stream_error(request_id, &error).into(),
+            ))
+            .await
+            .ok();
             return;
         }
     };
@@ -818,11 +823,11 @@ async fn handle_infer(
                 ErrorCode::ModelNotFound,
                 format!("Model '{}' not found", model_id),
             );
-            let _ = tx
-                .send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await;
+            tx.send(Message::Binary(
+                encode_stream_error(request_id, &error).into(),
+            ))
+            .await
+            .ok();
             return;
         }
     };
@@ -830,11 +835,11 @@ async fn handle_infer(
     // Validate inputs
     if let Err(e) = backend.validate_inputs(&inputs) {
         let error = ProtocolError::error(ErrorCode::InvalidInput, format!("Invalid inputs: {}", e));
-        let _ = tx
-            .send(Message::Binary(
-                encode_stream_error(request_id, &error).into(),
-            ))
-            .await;
+        tx.send(Message::Binary(
+            encode_stream_error(request_id, &error).into(),
+        ))
+        .await
+        .ok();
         return;
     }
 
@@ -848,11 +853,11 @@ async fn handle_infer(
                     ErrorCode::NoActiveImage,
                     "No active image set. Call set_image first.",
                 );
-                let _ = tx
-                    .send(Message::Binary(
-                        encode_stream_error(request_id, &error).into(),
-                    ))
-                    .await;
+                tx.send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await
+                .ok();
                 return;
             }
         }
@@ -864,11 +869,11 @@ async fn handle_infer(
             ErrorCode::EmbeddingRequired,
             "Model embedding not ready. Call prepare_model first.",
         );
-        let _ = tx
-            .send(Message::Binary(
-                encode_stream_error(request_id, &error).into(),
-            ))
-            .await;
+        tx.send(Message::Binary(
+            encode_stream_error(request_id, &error).into(),
+        ))
+        .await
+        .ok();
         return;
     }
 
@@ -895,11 +900,11 @@ async fn handle_infer(
                         ErrorCode::ImageNotFound,
                         format!("Failed to load image: {}", e),
                     );
-                    let _ = tx
-                        .send(Message::Binary(
-                            encode_stream_error(request_id, &error).into(),
-                        ))
-                        .await;
+                    tx.send(Message::Binary(
+                        encode_stream_error(request_id, &error).into(),
+                    ))
+                    .await
+                    .ok();
                     return;
                 }
             }
@@ -917,7 +922,9 @@ async fn handle_infer(
     let progress_tx = tx.clone();
     let progress_cb = Some(Box::new(move |progress: u8, status: &str| {
         let msg = encode_infer_progress(request_id, progress, status);
-        let _ = progress_tx.try_send(Message::Binary(msg.into()));
+        // try_send is non-blocking - if channel is full, progress update is dropped.
+        // This is acceptable because progress updates are non-critical telemetry.
+        progress_tx.try_send(Message::Binary(msg.into())).ok();
     }) as crate::inference::ProgressCallback);
 
     match backend
@@ -934,7 +941,7 @@ async fn handle_infer(
 
             let json_str = serde_json::to_string(&result_json).unwrap();
             let msg = encode_infer_result(request_id, &json_str);
-            let _ = tx.send(Message::Binary(msg.into())).await;
+            tx.send(Message::Binary(msg.into())).await.ok();
 
             tracing::debug!(
                 "Mux connection {}: inference complete ({}ms)",
@@ -948,11 +955,11 @@ async fn handle_infer(
                 ErrorCode::ModelDecodeFailed,
                 format!("Inference failed: {}", e),
             );
-            let _ = tx
-                .send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await;
+            tx.send(Message::Binary(
+                encode_stream_error(request_id, &error).into(),
+            ))
+            .await
+            .ok();
         }
     }
 }
@@ -980,14 +987,14 @@ async fn spawn_pyramid_task(state: Arc<AppState>, image_path: &Path, image_hash:
                 Ok(bands) => {
                     if let Err(e) = builder.build_and_save(&hash, &bands).await {
                         tracing::error!("Failed to build pyramid: {}", e);
-                        let _ = storage.mark_failed(&hash, &e.to_string()).await;
+                        storage.mark_failed(&hash, &e.to_string()).await.ok();
                     } else {
                         tracing::info!("Pyramid {} built successfully", hash);
                     }
                 }
                 Err(e) => {
                     tracing::error!("Failed to load bands for pyramid: {}", e);
-                    let _ = storage.mark_failed(&hash, &e.to_string()).await;
+                    storage.mark_failed(&hash, &e.to_string()).await.ok();
                 }
             }
         }
@@ -1082,11 +1089,11 @@ fn spawn_stream_task(
         if let Err(e) = result {
             tracing::error!("Stream {} error: {}", request_id, e);
             let error = ProtocolError::error(ErrorCode::InternalError, e.to_string());
-            let _ = tx
-                .send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await;
+            tx.send(Message::Binary(
+                encode_stream_error(request_id, &error).into(),
+            ))
+            .await
+            .ok();
         }
 
         // Remove ourselves from active streams
@@ -1180,9 +1187,9 @@ async fn stream_image_mux(
     }
 
     // Send stream complete
-    let _ = tx
-        .send(Message::Binary(encode_stream_complete(request_id).into()))
-        .await;
+    tx.send(Message::Binary(encode_stream_complete(request_id).into()))
+        .await
+        .ok();
 
     tracing::info!("Stream {} complete for '{}'", request_id, image_id);
     Ok(())
@@ -1340,7 +1347,7 @@ async fn stream_from_pyramid_mux(
     }
 
     let msg = encode_level_complete_mux(request_id, level.as_u8());
-    let _ = tx.send(Message::Binary(msg.into())).await;
+    tx.send(Message::Binary(msg.into())).await.ok();
 
     Ok(())
 }
@@ -1432,7 +1439,7 @@ async fn stream_from_source_mux(
     }
 
     let msg = encode_level_complete_mux(request_id, level as u8);
-    let _ = tx.send(Message::Binary(msg.into())).await;
+    tx.send(Message::Binary(msg.into())).await.ok();
 
     Ok(())
 }

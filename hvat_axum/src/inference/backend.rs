@@ -49,18 +49,31 @@ pub trait InferenceBackend: Send + Sync {
     ///
     /// Called when client sends `prepare_model`. For models like SAM
     /// that benefit from caching expensive encoder outputs.
+    ///
+    /// # Default Implementation
+    /// This default returns `Ok(())` immediately for models that don't need preparation.
+    /// `_image` and `_progress` are prefixed with underscore because:
+    /// 1. SAM overrides this method and DOES use both parameters (see sam_adapter.rs:86)
+    /// 2. Future models (YOLO, DINOv2) may override and use them differently
+    /// 3. Simple models that don't need preparation use this no-op default
+    /// The trait signature needs these parameters for models that DO use them.
     async fn prepare(
         &self,
-        image: &ImageContext,
-        progress: Option<ProgressCallback>,
+        _image: &ImageContext,
+        _progress: Option<ProgressCallback>,
     ) -> anyhow::Result<()> {
-        let _ = (image, progress);
         Ok(())
     }
 
     /// Check if embeddings are ready for the given image.
-    async fn is_prepared(&self, image_id: &str) -> bool {
-        let _ = image_id;
+    ///
+    /// # Default Implementation
+    /// Returns `true` for models that don't need preparation.
+    /// `_image_id` is prefixed with underscore because:
+    /// 1. SAM overrides this and DOES use image_id (see sam_adapter.rs:118)
+    /// 2. Models without embeddings use this default which doesn't need the ID
+    /// The trait signature needs this parameter for models that track per-image state.
+    async fn is_prepared(&self, _image_id: &str) -> bool {
         true // Models without embeddings are always "prepared"
     }
 
@@ -82,8 +95,14 @@ pub trait InferenceBackend: Send + Sync {
     /// Validate inputs against the model's schema.
     ///
     /// Returns `Ok(())` if valid, or an error describing the problem.
-    fn validate_inputs(&self, inputs: &Value) -> anyhow::Result<()> {
-        let _ = inputs;
+    ///
+    /// # Default Implementation
+    /// Accepts any input without validation.
+    /// `_inputs` is prefixed with underscore because:
+    /// 1. SAM overrides this and DOES use inputs (see sam_adapter.rs:192)
+    /// 2. Models without strict schemas use this permissive default
+    /// The trait signature needs this parameter for models that validate inputs.
+    fn validate_inputs(&self, _inputs: &Value) -> anyhow::Result<()> {
         Ok(()) // Default: accept anything
     }
 }
