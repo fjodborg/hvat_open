@@ -2,15 +2,26 @@
 //!
 //! Uses the `ort` crate for cross-platform ONNX inference with
 //! support for multiple execution providers (CUDA, ROCm, DirectML, CoreML, CPU).
+//!
+//! ## Concurrency Model
+//!
+//! The encoder and decoder sessions are protected by `tokio::sync::Mutex` and accessed
+//! via `spawn_blocking` tasks. This design prevents thread pool exhaustion when multiple
+//! concurrent encode/decode operations are queued:
+//!
+//! - `tokio::sync::Mutex`: Async-aware mutex that integrates with tokio runtime
+//! - `blocking_lock()`: Used within `spawn_blocking` to acquire locks without blocking threads
+//! - Tasks wait asynchronously in a queue rather than exhausting the blocking thread pool
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use hvat_common::{bilinear_sample, pixel_count, pixel_count_u32};
 use ort::session::Session;
 use ort::value::Tensor;
+use tokio::sync::Mutex;
 
 use super::backend::{EncoderOutput, ExecutionProvider, SamBackend, SamMaskResult, SamPoint};
 use super::models::SamVariant;
@@ -21,7 +32,10 @@ const SAM_INPUT_SIZE: u32 = 1024;
 /// ONNX Runtime-based SAM engine.
 ///
 /// Manages encoder and decoder sessions for SAM 2 inference.
-/// Sessions are wrapped in Mutex because ONNX Runtime's `run` requires `&mut self`.
+/// Sessions are wrapped in async Mutex because ONNX Runtime's `run` requires `&mut self`.
+/// Using tokio::sync::Mutex prevents thread pool exhaustion when multiple concurrent
+/// encode/decode operations try to acquire the lock - they wait asynchronously instead
+/// of blocking threads.
 pub struct OnnxSamEngine {
     encoder: Arc<Mutex<Session>>,
     decoder: Arc<Mutex<Session>>,
@@ -500,10 +514,10 @@ impl SamBackend for OnnxSamEngine {
             let size = SAM_INPUT_SIZE as i64;
             let input_tensor = Tensor::from_array(([1i64, 3, size, size], input_data))?;
 
-            // Lock the encoder session
-            let mut encoder_guard = encoder
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock encoder: {}", e))?;
+            // Lock the encoder session using blocking_lock() which is safe within spawn_blocking.
+            // This prevents thread pool exhaustion by allowing the tokio runtime to manage
+            // the lock queue asynchronously.
+            let mut encoder_guard = encoder.blocking_lock();
 
             // Run encoder with named inputs
             let outputs = encoder_guard.run(ort::inputs![
@@ -588,10 +602,10 @@ impl SamBackend for OnnxSamEngine {
             let has_mask = vec![0.0f32];
             let has_mask_tensor = Tensor::from_array(([1i64], has_mask))?;
 
-            // Lock the decoder session
-            let mut decoder_guard = decoder
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock decoder: {}", e))?;
+            // Lock the decoder session using blocking_lock() which is safe within spawn_blocking.
+            // This prevents thread pool exhaustion by allowing the tokio runtime to manage
+            // the lock queue asynchronously.
+            let mut decoder_guard = decoder.blocking_lock();
 
             // Run decoder with all required inputs
             let outputs = decoder_guard.run(ort::inputs![

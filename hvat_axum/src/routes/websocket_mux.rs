@@ -568,7 +568,22 @@ async fn handle_mux_message(
             request_id,
             model_id,
         } => {
-            handle_prepare_model(state, streams, tx, request_id, model_id, connection_id).await;
+            // Spawn prepare_model as a background task to avoid blocking image loading
+            let state_clone = state.clone();
+            let streams_clone = streams.clone();
+            let tx_clone = tx.clone();
+
+            tokio::spawn(async move {
+                handle_prepare_model(
+                    state_clone,
+                    streams_clone,
+                    tx_clone,
+                    request_id,
+                    model_id,
+                    connection_id,
+                )
+                .await;
+            });
         }
 
         ClientMessage::Infer {
