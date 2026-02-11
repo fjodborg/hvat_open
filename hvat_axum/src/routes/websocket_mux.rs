@@ -567,6 +567,7 @@ async fn handle_mux_message(
         ClientMessage::PrepareModel {
             request_id,
             model_id,
+            config,
         } => {
             // Spawn prepare_model as a background task to avoid blocking image loading
             let state_clone = state.clone();
@@ -580,6 +581,7 @@ async fn handle_mux_message(
                     tx_clone,
                     request_id,
                     model_id,
+                    config,
                     connection_id,
                 )
                 .await;
@@ -656,12 +658,14 @@ async fn handle_prepare_model(
     tx: mpsc::Sender<Message>,
     request_id: u32,
     model_id: String,
+    config: Option<serde_json::Value>,
     connection_id: u64,
 ) {
     tracing::info!(
-        "Mux connection {}: prepare_model {} (request_id={})",
+        "Mux connection {}: prepare_model {} with config {:?} (request_id={})",
         connection_id,
         model_id,
+        config,
         request_id
     );
 
@@ -719,28 +723,79 @@ async fn handle_prepare_model(
         }
     };
 
-    // Load RGB image data if not cached
+    // Parse band selection from config (if provided)
+    let (red_band, green_band, blue_band) = if let Some(cfg) = &config {
+        if let Some(bands) = cfg.get("bands") {
+            let red = bands.get("red").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let green = bands.get("green").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+            let blue = bands.get("blue").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+            (red, green, blue)
+        } else {
+            (0, 1, 2) // Default RGB bands
+        }
+    } else {
+        (0, 1, 2) // Default RGB bands
+    };
+
+    // Load RGB image data with selected bands
+    // Note: We don't cache band-specific extractions because they can vary per request
     let (rgb_data, width, height) = {
         let streams_guard = streams.read().await;
-        if let Some(cached) = streams_guard.get_cached_image(&image_id) {
-            (cached.rgb_data.clone(), cached.width, cached.height)
+
+        // Only use cache for default bands [0, 1, 2]
+        let use_cache = red_band == 0 && green_band == 1 && blue_band == 2;
+
+        if use_cache {
+            if let Some(cached) = streams_guard.get_cached_image(&image_id) {
+                let data = (cached.rgb_data.clone(), cached.width, cached.height);
+                drop(streams_guard);
+                data
+            } else {
+                drop(streams_guard);
+                // Load image with default bands
+                match load_image_rgb(&state, &image_id).await {
+                    Ok((rgb, w, h)) => {
+                        // Cache it
+                        streams
+                            .write()
+                            .await
+                            .cache_image(image_id.clone(), rgb.clone(), w, h);
+                        (rgb, w, h)
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load image '{}': {}", image_id, e);
+                        let error = ProtocolError::error(
+                            ErrorCode::ImageNotFound,
+                            format!("Failed to load image: {}", e),
+                        );
+                        tx.send(Message::Binary(
+                            encode_stream_error(request_id, &error).into(),
+                        ))
+                        .await
+                        .ok();
+                        return;
+                    }
+                }
+            }
         } else {
             drop(streams_guard);
-            // Load image
-            match load_image_rgb(&state, &image_id).await {
-                Ok((rgb, w, h)) => {
-                    // Cache it
-                    streams
-                        .write()
-                        .await
-                        .cache_image(image_id.clone(), rgb.clone(), w, h);
-                    (rgb, w, h)
-                }
+            // Load image with custom band selection (no caching)
+            match load_image_rgb_with_bands(&state, &image_id, red_band, green_band, blue_band)
+                .await
+            {
+                Ok((rgb, w, h)) => (rgb, w, h),
                 Err(e) => {
-                    tracing::error!("Failed to load image '{}': {}", image_id, e);
+                    tracing::error!(
+                        "Failed to load image '{}' with bands [{}, {}, {}]: {}",
+                        image_id,
+                        red_band,
+                        green_band,
+                        blue_band,
+                        e
+                    );
                     let error = ProtocolError::error(
                         ErrorCode::ImageNotFound,
-                        format!("Failed to load image: {}", e),
+                        format!("Failed to load image with bands: {}", e),
                     );
                     tx.send(Message::Binary(
                         encode_stream_error(request_id, &error).into(),
@@ -1075,6 +1130,60 @@ async fn load_image_rgb(state: &AppState, image_id: &str) -> Result<(Vec<u8>, u3
             bands.num_bands()
         )));
     };
+
+    Ok((rgb_data, width, height))
+}
+
+/// Load image with specific band selection for RGB channels.
+///
+/// This is used for SAM encoding with custom band selection on hyperspectral images.
+async fn load_image_rgb_with_bands(
+    state: &AppState,
+    image_id: &str,
+    red_band: u32,
+    green_band: u32,
+    blue_band: u32,
+) -> Result<(Vec<u8>, u32, u32), Error> {
+    let image_path = find_image(state, image_id)?;
+
+    // Load all bands
+    let loader = state
+        .loaders
+        .find_loader(&image_path)
+        .ok_or_else(|| Error::UnsupportedFormat(image_id.to_string()))?;
+
+    let bands = loader.load_bands(&image_path).await?;
+
+    let width = bands.width;
+    let height = bands.height;
+    let pixel_count = (width * height) as usize;
+    let num_bands = bands.num_bands();
+
+    // Clamp band indices to valid range
+    let red_idx = (red_band as usize).min(num_bands.saturating_sub(1));
+    let green_idx = (green_band as usize).min(num_bands.saturating_sub(1));
+    let blue_idx = (blue_band as usize).min(num_bands.saturating_sub(1));
+
+    tracing::info!(
+        "Extracting bands [{}, {}, {}] from {} total bands for SAM",
+        red_idx,
+        green_idx,
+        blue_idx,
+        num_bands
+    );
+
+    // Extract selected bands as RGB
+    let r = &bands.bands[red_idx];
+    let g = &bands.bands[green_idx];
+    let b = &bands.bands[blue_idx];
+
+    let mut rgb_data = Vec::with_capacity(pixel_count * 3);
+    for i in 0..pixel_count {
+        // Convert f32 [0.0, 1.0] to u8 [0, 255]
+        rgb_data.push((r[i].clamp(0.0, 1.0) * 255.0) as u8);
+        rgb_data.push((g[i].clamp(0.0, 1.0) * 255.0) as u8);
+        rgb_data.push((b[i].clamp(0.0, 1.0) * 255.0) as u8);
+    }
 
     Ok((rgb_data, width, height))
 }

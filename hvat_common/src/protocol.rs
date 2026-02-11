@@ -164,7 +164,15 @@ pub enum ClientMessage {
     ///
     /// Called when user selects a model with `requires_embedding: true`.
     /// Server responds with `ModelReady` when done.
-    PrepareModel { request_id: u32, model_id: String },
+    ///
+    /// Optional `config` field allows model-specific configuration.
+    /// For SAM models, config can include band selection for hyperspectral images.
+    PrepareModel {
+        request_id: u32,
+        model_id: String,
+        #[serde(default)]
+        config: Option<serde_json::Value>,
+    },
 
     /// Run inference with the active image.
     ///
