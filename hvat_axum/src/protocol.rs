@@ -4,11 +4,7 @@
 //! - JSON text frames for client→server commands and server→client responses
 //! - Binary frames for image layer data (server→client only)
 //!
-//! # Protocol Versions
-//!
-//! **Legacy (per-image WebSocket endpoint: `/api/images/{id}/stream`):**
-//! - Binary header: `[version:u8][type:u8][payload...]`
-//! - Each image gets its own WebSocket connection
+//! # Protocol
 //!
 //! **Multiplexed (single WebSocket endpoint: `/api/ws`):**
 //! - Binary header: `[version:u8][type:u8][request_id:u32][payload...]`
@@ -72,22 +68,6 @@ pub struct StreamMetadata {
 }
 
 impl StreamMetadata {
-    /// Encode metadata as binary (legacy protocol).
-    ///
-    /// Format: `[version:u8][type:u8][width:u32][height:u32][num_bands:u32][num_layers:u32][full_width:u32][full_height:u32]`
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(26);
-        buf.push(PROTOCOL_VERSION);
-        buf.push(ServerMessageType::Metadata.to_byte());
-        buf.extend_from_slice(&self.width.to_le_bytes());
-        buf.extend_from_slice(&self.height.to_le_bytes());
-        buf.extend_from_slice(&self.num_bands.to_le_bytes());
-        buf.extend_from_slice(&self.num_layers.to_le_bytes());
-        buf.extend_from_slice(&self.full_width.to_le_bytes());
-        buf.extend_from_slice(&self.full_height.to_le_bytes());
-        buf
-    }
-
     /// Encode metadata with request_id (multiplexed protocol).
     ///
     /// Format: `[version:u8][type:u8][request_id:u32][width:u32][height:u32][num_bands:u32][num_layers:u32][full_width:u32][full_height:u32]`
@@ -107,17 +87,6 @@ impl StreamMetadata {
 }
 
 // ============================================================================
-// Legacy Encoding Functions (per-image WebSocket)
-// ============================================================================
-
-/// Encode a Reset message (legacy protocol).
-///
-/// This signals the client to clear the current display before a new image loads.
-pub fn encode_reset() -> Vec<u8> {
-    vec![PROTOCOL_VERSION, ServerMessageType::Reset.to_byte()]
-}
-
-// ============================================================================
 // Multiplexed Encoding Functions (single WebSocket)
 // ============================================================================
 
@@ -127,18 +96,6 @@ pub fn encode_reset_mux(request_id: u32) -> Vec<u8> {
     buf.push(PROTOCOL_VERSION);
     buf.push(ServerMessageType::Reset.to_byte());
     buf.extend_from_slice(&request_id.to_le_bytes());
-    buf
-}
-
-/// Encode a layer chunk message (legacy protocol).
-pub fn encode_layer_chunk(layer: u16, row_start: u32, row_end: u32, rgba_data: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(12 + rgba_data.len());
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::LayerChunk.to_byte());
-    buf.extend_from_slice(&layer.to_le_bytes());
-    buf.extend_from_slice(&row_start.to_le_bytes());
-    buf.extend_from_slice(&row_end.to_le_bytes());
-    buf.extend_from_slice(rgba_data);
     buf
 }
 
@@ -161,15 +118,6 @@ pub fn encode_layer_chunk_mux(
     buf
 }
 
-/// Encode a layer complete message (legacy protocol).
-pub fn encode_layer_complete(layer: u16) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(4);
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::LayerComplete.to_byte());
-    buf.extend_from_slice(&layer.to_le_bytes());
-    buf
-}
-
 /// Encode a layer complete message with request_id (multiplexed protocol).
 pub fn encode_layer_complete_mux(request_id: u32, layer: u16) -> Vec<u8> {
     let mut buf = Vec::with_capacity(8);
@@ -180,15 +128,6 @@ pub fn encode_layer_complete_mux(request_id: u32, layer: u16) -> Vec<u8> {
     buf
 }
 
-/// Encode a level complete message (legacy protocol).
-pub fn encode_level_complete(level: u8) -> Vec<u8> {
-    vec![
-        PROTOCOL_VERSION,
-        ServerMessageType::LevelComplete.to_byte(),
-        level,
-    ]
-}
-
 /// Encode a level complete message with request_id (multiplexed protocol).
 pub fn encode_level_complete_mux(request_id: u32, level: u8) -> Vec<u8> {
     let mut buf = Vec::with_capacity(7);
@@ -197,14 +136,6 @@ pub fn encode_level_complete_mux(request_id: u32, level: u8) -> Vec<u8> {
     buf.extend_from_slice(&request_id.to_le_bytes());
     buf.push(level);
     buf
-}
-
-/// Encode an all complete message (legacy protocol - all levels sent).
-pub fn encode_all_complete() -> Vec<u8> {
-    vec![
-        PROTOCOL_VERSION,
-        ServerMessageType::StreamComplete.to_byte(),
-    ]
 }
 
 /// Encode a stream complete message with request_id (multiplexed protocol).
@@ -243,18 +174,6 @@ pub fn encode_error(error: &ProtocolError) -> Vec<u8> {
 /// Creates a non-retryable error with the given code and message.
 pub fn encode_simple_error(code: ErrorCode, message: &str) -> Vec<u8> {
     ProtocolError::error(code, message).encode(PROTOCOL_VERSION)
-}
-
-/// Encode server capabilities message.
-///
-/// This is sent immediately on WebSocket connection to inform the client
-/// about server features and protocol version.
-///
-/// **Deprecated:** Use `encode_capabilities_v2` instead. This function exists
-/// for backwards compatibility during migration.
-#[deprecated(note = "Use encode_capabilities_v2 instead")]
-pub fn encode_capabilities(capabilities: &ServerCapabilities) -> Vec<u8> {
-    encode_capabilities_v2(capabilities)
 }
 
 /// Encode a Ping message for keepalive.
@@ -359,57 +278,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_reset_encoding() {
-        let reset = encode_reset();
-        assert_eq!(reset.len(), 2);
-        assert_eq!(reset[0], PROTOCOL_VERSION);
-        assert_eq!(reset[1], ServerMessageType::Reset.to_byte());
-    }
-
-    #[test]
-    fn test_metadata_encoding() {
-        let meta = StreamMetadata {
-            width: 1024,
-            height: 768,
-            num_bands: 10,
-            num_layers: 3,
-            full_width: 2048,
-            full_height: 1536,
-        };
-        let bytes = meta.to_bytes();
-
-        assert_eq!(bytes.len(), 26);
-        assert_eq!(bytes[0], PROTOCOL_VERSION);
-        assert_eq!(bytes[1], ServerMessageType::Metadata.to_byte());
-
-        // Verify width
-        assert_eq!(
-            u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]),
-            1024
-        );
-        // Verify height
-        assert_eq!(
-            u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]),
-            768
-        );
-    }
-
-    #[test]
-    fn test_layer_chunk_encoding() {
-        let data = vec![255u8, 128, 64, 32];
-        let chunk = encode_layer_chunk(0, 0, 10, &data);
-
-        assert_eq!(chunk[0], PROTOCOL_VERSION);
-        assert_eq!(chunk[1], ServerMessageType::LayerChunk.to_byte());
-
-        // Verify layer index
-        assert_eq!(u16::from_le_bytes([chunk[2], chunk[3]]), 0);
-
-        // Verify data
-        assert_eq!(&chunk[12..], &data[..]);
-    }
-
-    #[test]
     fn test_error_encoding() {
         let error =
             ProtocolError::retryable(ErrorCode::PyramidNotReady, "Pyramid is building", 5000);
@@ -420,9 +288,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    // TODO: [Phase 6] shouldn this exist?
-    fn test_capabilities_encoding() {
+    fn test_capabilities_encoding_v2() {
         use hvat_common::{ModelCapability, ModelType, ServerInfo, ServerLimits};
         use std::collections::HashMap;
 
@@ -451,7 +317,7 @@ mod tests {
             }],
         };
 
-        let encoded = encode_capabilities(&caps);
+        let encoded = encode_capabilities_v2(&caps);
 
         // Verify header
         assert_eq!(encoded[0], PROTOCOL_VERSION);
@@ -471,86 +337,6 @@ mod tests {
         assert_eq!(decoded.limits.max_concurrent_streams, 4);
         assert_eq!(decoded.models.len(), 1);
         assert_eq!(decoded.models[0].id, "sam-tiny");
-    }
-
-    /// Integration test: simulates full client-server protocol exchange.
-    ///
-    /// This verifies that:
-    /// 1. Server sends Capabilities as first message
-    /// 2. Client can parse Capabilities and validate version
-    /// 3. Server sends Reset, Metadata, LayerChunk, etc.
-    /// 4. Client can parse all message types
-    #[test]
-    fn test_protocol_message_exchange() {
-        use hvat_common::protocol::ServerMessageType;
-
-        // Simulate server sending messages
-        let mut server_messages: Vec<Vec<u8>> = Vec::new();
-
-        // 1. Server sends Capabilities on connect
-        let caps = ServerCapabilities::default();
-        server_messages.push(encode_capabilities_v2(&caps));
-
-        // 2. Server sends Reset before new image
-        server_messages.push(encode_reset());
-
-        // 3. Server sends Metadata
-        let meta = StreamMetadata {
-            width: 256,
-            height: 256,
-            num_bands: 3,
-            num_layers: 1,
-            full_width: 1024,
-            full_height: 1024,
-        };
-        server_messages.push(meta.to_bytes());
-
-        // 4. Server sends a LayerChunk
-        let pixel_data = vec![255u8, 0, 0, 255]; // Red pixel RGBA
-        server_messages.push(encode_layer_chunk(0, 0, 1, &pixel_data));
-
-        // 5. Server sends LayerComplete
-        server_messages.push(encode_layer_complete(0));
-
-        // 6. Server sends LevelComplete
-        server_messages.push(encode_level_complete(0));
-
-        // Now simulate client parsing each message
-        for (i, msg) in server_messages.iter().enumerate() {
-            assert!(msg.len() >= 2, "Message {} too short", i);
-
-            let version = msg[0];
-            let msg_type = ServerMessageType::from_byte(msg[1]);
-
-            assert_eq!(
-                version, PROTOCOL_VERSION,
-                "Version mismatch in message {}",
-                i
-            );
-            assert!(msg_type.is_some(), "Unknown message type in message {}", i);
-
-            let msg_type = msg_type.unwrap();
-            let payload = &msg[2..];
-
-            match i {
-                0 => {
-                    assert_eq!(msg_type, ServerMessageType::Capabilities);
-                    let decoded_caps: ServerCapabilities = serde_json::from_slice(payload).unwrap();
-                    assert_eq!(decoded_caps.protocol_version, PROTOCOL_VERSION);
-                    // Simulate client version check
-                    assert!(decoded_caps.is_compatible(PROTOCOL_VERSION));
-                }
-                1 => assert_eq!(msg_type, ServerMessageType::Reset),
-                2 => {
-                    assert_eq!(msg_type, ServerMessageType::Metadata);
-                    // In real client, we'd parse StreamMetadata here
-                }
-                3 => assert_eq!(msg_type, ServerMessageType::LayerChunk),
-                4 => assert_eq!(msg_type, ServerMessageType::LayerComplete),
-                5 => assert_eq!(msg_type, ServerMessageType::LevelComplete),
-                _ => panic!("Unexpected message index"),
-            }
-        }
     }
 
     /// Test version mismatch detection.

@@ -23,28 +23,30 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::error::Error;
 use crate::packer::{downsample_bands, pack_bands_to_rgba_layers};
 use crate::protocol::{
+    ClientMessage, ErrorCode, PROTOCOL_VERSION, ProtocolError, ServerCapabilities, StreamMetadata,
     encode_capabilities_v2, encode_image_set, encode_infer_progress, encode_infer_result,
     encode_layer_chunk_mux, encode_layer_complete_mux, encode_level_complete_mux,
     encode_model_ready, encode_ping, encode_reset_mux, encode_stream_complete, encode_stream_error,
-    ClientMessage, ErrorCode, ProtocolError, ServerCapabilities, StreamMetadata, PROTOCOL_VERSION,
 };
-use crate::pyramid::{compute_image_hash, PyramidStatus};
+use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::state::AppState;
 use crate::utils::find_image;
 
 const YIELD_EVERY_N_CHUNKS: u32 = 8;
+const MAX_CONCURRENT_INFERENCES: u32 = 2;
+const MAX_PREPARED_DIMENSIONS: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SamBands {
@@ -85,6 +87,18 @@ impl SamBands {
     fn embedding_key(self, image_id: &str) -> String {
         format!("{}#{}:{}:{}", image_id, self.red, self.green, self.blue)
     }
+
+    fn clamp_to_num_bands(self, num_bands: usize) -> Self {
+        if num_bands == 0 {
+            return Self::default_rgb();
+        }
+        let max_idx = num_bands.saturating_sub(1) as u32;
+        Self {
+            red: self.red.min(max_idx),
+            green: self.green.min(max_idx),
+            blue: self.blue.min(max_idx),
+        }
+    }
 }
 
 /// State for a single active stream within a multiplexed connection.
@@ -111,14 +125,26 @@ struct ActiveInference {
     model_id: String,
 }
 
+/// State for an active model preparation task.
+struct ActivePrepare {
+    /// Task handle for the prepare coroutine
+    task: JoinHandle<()>,
+    /// Model ID being prepared
+    model_id: String,
+}
+
 /// Manages all active streams for a single WebSocket connection.
 struct ConnectionStreams {
     /// Active streams indexed by request_id
     streams: HashMap<u32, ActiveStream>,
+    /// Active prepare tasks indexed by request_id
+    prepares: HashMap<u32, ActivePrepare>,
     /// Active inference tasks indexed by request_id
     inferences: HashMap<u32, ActiveInference>,
     /// Maximum concurrent streams allowed
     max_streams: u32,
+    /// Maximum concurrent inferences allowed
+    max_inferences: u32,
     /// Active image ID (set by SetImage message)
     active_image_id: Option<String>,
     /// Cached RGB image data for inference (avoid reloading for each infer call)
@@ -128,11 +154,13 @@ struct ConnectionStreams {
 }
 
 impl ConnectionStreams {
-    fn new(max_streams: u32) -> Self {
+    fn new(max_streams: u32, max_inferences: u32) -> Self {
         Self {
             streams: HashMap::new(),
+            prepares: HashMap::new(),
             inferences: HashMap::new(),
             max_streams,
+            max_inferences,
             active_image_id: None,
             cached_image: None,
             prepared_dimensions: HashMap::new(),
@@ -145,6 +173,9 @@ impl ConnectionStreams {
         if self.active_image_id.as_ref() != Some(&image_id) {
             self.cached_image = None;
         }
+        let keep_prefix = format!("{}#", image_id);
+        self.prepared_dimensions
+            .retain(|key, _| key.starts_with(&keep_prefix));
         self.active_image_id = Some(image_id);
     }
 
@@ -167,6 +198,18 @@ impl ConnectionStreams {
     fn cache_prepared_dimensions(&mut self, embedding_key: String, width: u32, height: u32) {
         self.prepared_dimensions
             .insert(embedding_key, (width, height));
+        if self.prepared_dimensions.len() > MAX_PREPARED_DIMENSIONS {
+            let overflow = self.prepared_dimensions.len() - MAX_PREPARED_DIMENSIONS;
+            let keys_to_drop: Vec<String> = self
+                .prepared_dimensions
+                .keys()
+                .take(overflow)
+                .cloned()
+                .collect();
+            for key in keys_to_drop {
+                self.prepared_dimensions.remove(&key);
+            }
+        }
     }
 
     /// Read dimensions for a prepared embedding key.
@@ -184,6 +227,10 @@ impl ConnectionStreams {
     /// Check if we can start a new stream.
     fn can_start_stream(&self) -> bool {
         (self.streams.len() as u32) < self.max_streams
+    }
+
+    fn max_streams(&self) -> u32 {
+        self.max_streams
     }
 
     /// Register a new stream.
@@ -219,9 +266,35 @@ impl ConnectionStreams {
         }
     }
 
-    /// Get the number of active streams.
-    fn len(&self) -> usize {
-        self.streams.len()
+    /// Register a new prepare task.
+    fn insert_prepare(&mut self, request_id: u32, prepare: ActivePrepare) {
+        self.prepares.insert(request_id, prepare);
+    }
+
+    /// Remove a completed prepare task (without aborting).
+    fn remove_prepare(&mut self, request_id: u32) {
+        self.prepares.remove(&request_id);
+    }
+
+    /// Cancel all active prepare tasks.
+    fn cancel_all_prepares(&mut self) {
+        for (request_id, prepare) in self.prepares.drain() {
+            prepare.task.abort();
+            tracing::debug!(
+                "Cancelled prepare {} for model '{}' (replaced/new priority task)",
+                request_id,
+                prepare.model_id
+            );
+        }
+    }
+
+    /// Check if we can start a new inference task.
+    fn can_start_inference(&self) -> bool {
+        (self.inferences.len() as u32) < self.max_inferences
+    }
+
+    fn max_inferences(&self) -> u32 {
+        self.max_inferences
     }
 
     /// Register a new inference task.
@@ -333,6 +406,7 @@ async fn handle_websocket_mux_inner(
     let connection_alive = Arc::new(AtomicBool::new(true));
     let streams = Arc::new(RwLock::new(ConnectionStreams::new(
         state.config.max_user_streams as u32,
+        MAX_CONCURRENT_INFERENCES,
     )));
 
     // Build and send server capabilities immediately
@@ -482,6 +556,7 @@ async fn handle_websocket_mux_inner(
     // Cancel all active streams and inferences
     let mut streams_guard = streams.write().await;
     streams_guard.cancel_all();
+    streams_guard.cancel_all_prepares();
     streams_guard.cancel_all_inferences();
 
     // Clean up
@@ -561,7 +636,7 @@ async fn handle_mux_message(
                         ErrorCode::RateLimited,
                         format!(
                             "Maximum concurrent streams ({}) reached",
-                            streams_guard.len()
+                            streams_guard.max_streams()
                         ),
                         1000,
                     );
@@ -627,15 +702,19 @@ async fn handle_mux_message(
             image_id,
             config,
         } => {
-            // Spawn prepare_model as a background task to avoid blocking image loading
+            // Keep only the newest prepare task. Stale preloads are low priority.
+            streams.write().await.cancel_all_prepares();
+
+            // Spawn prepare_model as a tracked task so stale prepares can be aborted.
             let state_clone = state.clone();
             let streams_clone = streams.clone();
             let tx_clone = tx.clone();
+            let model_id_for_tracking = model_id.clone();
 
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 handle_prepare_model(
                     state_clone,
-                    streams_clone,
+                    streams_clone.clone(),
                     tx_clone,
                     request_id,
                     model_id,
@@ -644,7 +723,18 @@ async fn handle_mux_message(
                     connection_id,
                 )
                 .await;
+
+                // Remove from tracking when complete
+                streams_clone.write().await.remove_prepare(request_id);
             });
+
+            streams.write().await.insert_prepare(
+                request_id,
+                ActivePrepare {
+                    task,
+                    model_id: model_id_for_tracking,
+                },
+            );
         }
 
         ClientMessage::Infer {
@@ -654,6 +744,30 @@ async fn handle_mux_message(
             inputs,
             options,
         } => {
+            let max_inferences_reached = {
+                let mut streams_guard = streams.write().await;
+                if !streams_guard.can_start_inference() {
+                    Some(streams_guard.max_inferences())
+                } else {
+                    // Prioritize active inference over preloading prepares.
+                    streams_guard.cancel_all_prepares();
+                    None
+                }
+            };
+            if let Some(max_inferences) = max_inferences_reached {
+                let error = ProtocolError::retryable(
+                    ErrorCode::ModelBusy,
+                    format!("Maximum concurrent inferences ({}) reached", max_inferences),
+                    100,
+                );
+                tx.send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await
+                .ok();
+                return;
+            }
+
             // Spawn inference as a tracked task so it can be cancelled
             let state_clone = state.clone();
             let streams_clone = streams.clone();
@@ -788,8 +902,40 @@ async fn handle_prepare_model(
         }
     };
 
-    let bands = SamBands::from_config(config.as_ref());
-    let embedding_key = bands.embedding_key(&image_id);
+    let requested_bands = SamBands::from_config(config.as_ref());
+    let resolved_bands = if requested_bands.is_default_rgb() {
+        requested_bands
+    } else {
+        match resolve_sam_bands(&state, &image_id, requested_bands).await {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                tracing::error!("Failed to resolve band selection for '{}': {}", image_id, e);
+                let error = ProtocolError::error(
+                    ErrorCode::ImageNotFound,
+                    format!("Failed to resolve image bands: {}", e),
+                );
+                tx.send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await
+                .ok();
+                return;
+            }
+        }
+    };
+    if resolved_bands != requested_bands {
+        tracing::debug!(
+            "Resolved requested SAM bands [{}, {}, {}] to [{}, {}, {}] for '{}'",
+            requested_bands.red,
+            requested_bands.green,
+            requested_bands.blue,
+            resolved_bands.red,
+            resolved_bands.green,
+            resolved_bands.blue,
+            image_id
+        );
+    }
+    let embedding_key = resolved_bands.embedding_key(&image_id);
 
     // Load RGB image data with selected bands
     // Note: We don't cache band-specific extractions because they can vary per request
@@ -797,7 +943,7 @@ async fn handle_prepare_model(
         let streams_guard = streams.read().await;
 
         // Only use cache for default bands [0, 1, 2]
-        let use_cache = bands.is_default_rgb();
+        let use_cache = resolved_bands.is_default_rgb();
 
         if use_cache {
             if let Some(cached) = streams_guard.get_cached_image(&image_id) {
@@ -834,17 +980,26 @@ async fn handle_prepare_model(
         } else {
             drop(streams_guard);
             // Load image with custom band selection (no caching)
-            match load_image_rgb_with_bands(&state, &image_id, bands.red, bands.green, bands.blue)
-                .await
+            match load_image_rgb_with_bands(
+                &state,
+                &image_id,
+                resolved_bands.red,
+                resolved_bands.green,
+                resolved_bands.blue,
+            )
+            .await
             {
-                Ok((rgb, w, h)) => (rgb, w, h),
+                Ok((rgb, w, h, _resolved)) => (rgb, w, h),
                 Err(e) => {
                     tracing::error!(
-                        "Failed to load image '{}' with bands [{}, {}, {}]: {}",
+                        "Failed to load image '{}' with requested bands [{}, {}, {}] (resolved [{}, {}, {}]): {}",
                         image_id,
-                        bands.red,
-                        bands.green,
-                        bands.blue,
+                        requested_bands.red,
+                        requested_bands.green,
+                        requested_bands.blue,
+                        resolved_bands.red,
+                        resolved_bands.green,
+                        resolved_bands.blue,
                         e
                     );
                     let error = ProtocolError::error(
@@ -992,16 +1147,61 @@ async fn handle_infer(
             }
         }
     };
-    let bands = SamBands::from_config(Some(&options));
-    let embedding_key = bands.embedding_key(&image_id);
+    let requested_bands = SamBands::from_config(Some(&options));
+    let mut resolved_bands = requested_bands;
+    let mut embedding_key = requested_bands.embedding_key(&image_id);
 
-    // Check if model requires embedding and if it's ready
+    // Resolve clamped key if needed so [19,1,2] and [2,1,2] share the same embedding on 3-band images.
+    if backend.requires_embedding()
+        && !requested_bands.is_default_rgb()
+        && !backend.is_prepared(&embedding_key).await
+    {
+        match resolve_sam_bands(&state, &image_id, requested_bands).await {
+            Ok(resolved) => {
+                resolved_bands = resolved;
+                embedding_key = resolved_bands.embedding_key(&image_id);
+            }
+            Err(e) => {
+                tracing::error!("Failed to resolve band selection for '{}': {}", image_id, e);
+                let error = ProtocolError::error(
+                    ErrorCode::ImageNotFound,
+                    format!("Failed to resolve image bands: {}", e),
+                );
+                tx.send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
+                .await
+                .ok();
+                return;
+            }
+        }
+    }
+    if resolved_bands != requested_bands {
+        tracing::debug!(
+            "Resolved infer bands [{}, {}, {}] to [{}, {}, {}] for '{}'",
+            requested_bands.red,
+            requested_bands.green,
+            requested_bands.blue,
+            resolved_bands.red,
+            resolved_bands.green,
+            resolved_bands.blue,
+            image_id
+        );
+    }
+
+    // Check if model requires embedding and if it's ready.
     if backend.requires_embedding() && !backend.is_prepared(&embedding_key).await {
         let error = ProtocolError::error(
             ErrorCode::EmbeddingRequired,
             format!(
-                "Model embedding not ready for image '{}' and bands [{}, {}, {}]. Call prepare_model first.",
-                image_id, bands.red, bands.green, bands.blue
+                "Model embedding not ready for image '{}' and bands [{}, {}, {}] (resolved [{}, {}, {}]). Call prepare_model first.",
+                image_id,
+                requested_bands.red,
+                requested_bands.green,
+                requested_bands.blue,
+                resolved_bands.red,
+                resolved_bands.green,
+                resolved_bands.blue
             ),
         );
         tx.send(Message::Binary(
@@ -1016,7 +1216,7 @@ async fn handle_infer(
         // Fast path: for embedding-backed models, infer only needs dimensions.
         if let Some((w, h)) = streams.read().await.prepared_dimensions(&embedding_key) {
             (embedding_key.clone(), Vec::new(), w, h)
-        } else if bands.is_default_rgb() {
+        } else if resolved_bands.is_default_rgb() {
             let streams_guard = streams.read().await;
             if let Some(cached) = streams_guard.get_cached_image(&image_id) {
                 (
@@ -1051,17 +1251,26 @@ async fn handle_infer(
                 }
             }
         } else {
-            match load_image_rgb_with_bands(&state, &image_id, bands.red, bands.green, bands.blue)
-                .await
+            match load_image_rgb_with_bands(
+                &state,
+                &image_id,
+                resolved_bands.red,
+                resolved_bands.green,
+                resolved_bands.blue,
+            )
+            .await
             {
-                Ok((_rgb, w, h)) => (embedding_key.clone(), Vec::new(), w, h),
+                Ok((_rgb, w, h, _resolved)) => (embedding_key.clone(), Vec::new(), w, h),
                 Err(e) => {
                     tracing::error!(
-                        "Failed to load image '{}' with bands [{}, {}, {}]: {}",
+                        "Failed to load image '{}' with requested bands [{}, {}, {}] (resolved [{}, {}, {}]): {}",
                         image_id,
-                        bands.red,
-                        bands.green,
-                        bands.blue,
+                        requested_bands.red,
+                        requested_bands.green,
+                        requested_bands.blue,
+                        resolved_bands.red,
+                        resolved_bands.green,
+                        resolved_bands.blue,
                         e
                     );
                     let error = ProtocolError::error(
@@ -1214,6 +1423,21 @@ async fn spawn_pyramid_task(state: Arc<AppState>, image_path: &Path, image_hash:
         .insert(hash_for_insert, handle);
 }
 
+/// Resolve SAM band selection against image metadata so keys are canonical.
+async fn resolve_sam_bands(
+    state: &AppState,
+    image_id: &str,
+    requested: SamBands,
+) -> Result<SamBands, Error> {
+    let image_path = find_image(state, image_id)?;
+    let loader = state
+        .loaders
+        .find_loader(&image_path)
+        .ok_or_else(|| Error::UnsupportedFormat(image_id.to_string()))?;
+    let metadata = loader.load_metadata(&image_path).await?;
+    Ok(requested.clamp_to_num_bands(metadata.num_bands))
+}
+
 /// Load RGB image data for inference.
 async fn load_image_rgb(state: &AppState, image_id: &str) -> Result<(Vec<u8>, u32, u32), Error> {
     let image_path = find_image(state, image_id)?;
@@ -1276,7 +1500,7 @@ async fn load_image_rgb_with_bands(
     red_band: u32,
     green_band: u32,
     blue_band: u32,
-) -> Result<(Vec<u8>, u32, u32), Error> {
+) -> Result<(Vec<u8>, u32, u32, SamBands), Error> {
     let image_path = find_image(state, image_id)?;
 
     // Load all bands
@@ -1293,9 +1517,15 @@ async fn load_image_rgb_with_bands(
     let num_bands = bands.num_bands();
 
     // Clamp band indices to valid range
-    let red_idx = (red_band as usize).min(num_bands.saturating_sub(1));
-    let green_idx = (green_band as usize).min(num_bands.saturating_sub(1));
-    let blue_idx = (blue_band as usize).min(num_bands.saturating_sub(1));
+    let resolved = SamBands {
+        red: red_band,
+        green: green_band,
+        blue: blue_band,
+    }
+    .clamp_to_num_bands(num_bands);
+    let red_idx = resolved.red as usize;
+    let green_idx = resolved.green as usize;
+    let blue_idx = resolved.blue as usize;
 
     tracing::info!(
         "Extracting bands [{}, {}, {}] from {} total bands for SAM",
@@ -1318,7 +1548,7 @@ async fn load_image_rgb_with_bands(
         rgb_data.push((b[i].clamp(0.0, 1.0) * 255.0) as u8);
     }
 
-    Ok((rgb_data, width, height))
+    Ok((rgb_data, width, height, resolved))
 }
 
 /// Spawn a task to stream an image.
@@ -1737,7 +1967,7 @@ fn build_server_capabilities(state: &AppState) -> ServerCapabilities {
             max_image_size: state.config.max_cache_memory,
             max_pyramid_levels: hvat_common::MAX_PYRAMID_LEVEL,
             max_concurrent_streams: state.config.max_user_streams as u32,
-            max_concurrent_inferences: 2, // TODO: Make configurable
+            max_concurrent_inferences: MAX_CONCURRENT_INFERENCES,
         },
         models: if let Some(ref registry) = state.model_registry {
             registry.capabilities()

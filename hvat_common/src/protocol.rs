@@ -1,24 +1,14 @@
 //! WebSocket protocol types shared between client and server.
 //!
 //! This module defines the binary protocol for streaming hyperspectral images
-//! and running model inference over WebSocket connections. The protocol is
-//! versioned to allow future extensions while maintaining backward compatibility.
+//! and running model inference over WebSocket connections.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// SAM point for legacy protocol (will be removed).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct SamPoint {
-    pub x: f32,
-    pub y: f32,
-    pub label: i32,
-}
-
 /// Current protocol version.
 ///
 /// Version 2: Model-agnostic inference protocol with self-describing capabilities.
-/// Version 1: Legacy protocol with hardcoded SAM messages.
 pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Binary message types (server → client).
