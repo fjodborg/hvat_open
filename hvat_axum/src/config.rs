@@ -265,7 +265,7 @@ impl ServerConfig {
         }
     }
 
-    /// Load configuration from environment variables (legacy method).
+    /// Load configuration from environment variables.
     pub fn from_env() -> Self {
         // Parse CLI args which also reads env vars via clap
         Self::from_cli(CliArgs::parse())

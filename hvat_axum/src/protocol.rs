@@ -178,12 +178,15 @@ pub fn encode_simple_error(code: ErrorCode, message: &str) -> Vec<u8> {
 
 /// Encode a Ping message for keepalive.
 ///
+/// Format: `[version:u8][type:u8][request_id=0:u32][timestamp:u64]`
+///
 /// The timestamp is typically the server's monotonic time in milliseconds,
 /// which the client echoes back in a Pong message.
 pub fn encode_ping(timestamp: u64) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(10);
+    let mut buf = Vec::with_capacity(14);
     buf.push(PROTOCOL_VERSION);
     buf.push(ServerMessageType::Ping.to_byte());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // request_id = 0 for connection-level
     buf.extend_from_slice(&timestamp.to_le_bytes());
     buf
 }
@@ -337,6 +340,26 @@ mod tests {
         assert_eq!(decoded.limits.max_concurrent_streams, 4);
         assert_eq!(decoded.models.len(), 1);
         assert_eq!(decoded.models[0].id, "sam-tiny");
+    }
+
+    #[test]
+    fn test_ping_encoding_includes_connection_request_id() {
+        let timestamp = 123_456_789_u64;
+        let encoded = encode_ping(timestamp);
+
+        assert_eq!(encoded[0], PROTOCOL_VERSION);
+        assert_eq!(encoded[1], ServerMessageType::Ping.to_byte());
+        assert_eq!(
+            u32::from_le_bytes([encoded[2], encoded[3], encoded[4], encoded[5]]),
+            0
+        );
+        assert_eq!(
+            u64::from_le_bytes([
+                encoded[6], encoded[7], encoded[8], encoded[9], encoded[10], encoded[11],
+                encoded[12], encoded[13]
+            ]),
+            timestamp
+        );
     }
 
     /// Test version mismatch detection.

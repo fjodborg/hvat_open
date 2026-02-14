@@ -120,7 +120,7 @@ impl ProtocolError {
         buf
     }
 
-    /// Encode to binary protocol format (legacy).
+    /// Encode to binary protocol format.
     ///
     /// Format:
     /// ```text
