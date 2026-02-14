@@ -18,7 +18,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use hvat_common::{bilinear_sample, pixel_count, pixel_count_u32};
+use hvat_common::{bilinear_sample, pixel_count};
+use ort::execution_providers::{
+    CPUExecutionProvider, CUDAExecutionProvider, CoreMLExecutionProvider,
+    DirectMLExecutionProvider, ExecutionProvider as OrtExecutionProviderTrait,
+    ExecutionProviderDispatch, ROCmExecutionProvider,
+};
 use ort::session::Session;
 use ort::value::Tensor;
 use tokio::sync::Mutex;
@@ -28,6 +33,16 @@ use super::models::SamVariant;
 
 /// SAM 2 input image size (model expects 1024x1024).
 const SAM_INPUT_SIZE: u32 = 1024;
+/// Maximum resolution used for contour/component extraction.
+///
+/// Keeping this at SAM working resolution avoids expensive O(W*H) component
+/// analysis on very large source images.
+const MAX_CONTOUR_RESOLUTION: usize = SAM_INPUT_SIZE as usize;
+/// SAM protocol currently returns polygons, not raster masks.
+///
+/// Keep this false to avoid expensive full-resolution binary mask materialization
+/// on each inference.
+const EMIT_BINARY_MASKS: bool = false;
 
 /// ONNX Runtime-based SAM engine.
 ///
@@ -77,24 +92,37 @@ impl OnnxSamEngine {
     /// Build an ONNX session with the specified execution provider.
     fn build_session(model_path: &Path, provider: ExecutionProvider) -> Result<Session> {
         let builder = Session::builder()?;
-
-        // Configure execution providers based on selection
-        // Note: Features must be enabled in Cargo.toml for each provider
-        // For now, we just use CPU - GPU providers require feature flags
-        match provider {
-            ExecutionProvider::Cpu => {
-                // CPU is always available, no additional setup needed
-            }
-            _ => {
-                log::warn!(
-                    "{} provider requested but GPU features not enabled, falling back to CPU",
-                    provider.name()
-                );
-            }
-        }
-
+        let provider_chain = Self::provider_dispatch_chain(provider);
+        log::info!(
+            "Building ONNX session for '{}' with execution providers: {:?}",
+            model_path.display(),
+            provider_chain
+        );
+        let builder = builder.with_execution_providers(provider_chain)?;
         let session = builder.commit_from_file(model_path)?;
         Ok(session)
+    }
+
+    fn provider_dispatch_chain(provider: ExecutionProvider) -> Vec<ExecutionProviderDispatch> {
+        match provider {
+            ExecutionProvider::Cpu => vec![CPUExecutionProvider::default().build()],
+            ExecutionProvider::Cuda => vec![
+                CUDAExecutionProvider::default().build(),
+                CPUExecutionProvider::default().build(),
+            ],
+            ExecutionProvider::Rocm => vec![
+                ROCmExecutionProvider::default().build(),
+                CPUExecutionProvider::default().build(),
+            ],
+            ExecutionProvider::DirectML => vec![
+                DirectMLExecutionProvider::default().build(),
+                CPUExecutionProvider::default().build(),
+            ],
+            ExecutionProvider::CoreML => vec![
+                CoreMLExecutionProvider::default().build(),
+                CPUExecutionProvider::default().build(),
+            ],
+        }
     }
 
     /// Preprocess image for SAM encoder.
@@ -213,31 +241,86 @@ impl OnnxSamEngine {
         let hi_res_mask =
             Self::bilinear_upsample(mask_data, mask_width, mask_height, hi_res_w, hi_res_h);
 
-        // Step 2: Threshold and scale to original image size
-        let mut binary_mask = vec![0u8; pixel_count_u32(original_width, original_height)];
+        // Step 2: Compute contour on a capped working grid (max 1024x1024),
+        // then scale vertices back to original image coordinates.
+        let contour_w = (original_width as usize).min(MAX_CONTOUR_RESOLUTION);
+        let contour_h = (original_height as usize).min(MAX_CONTOUR_RESOLUTION);
+        let contour_mask =
+            Self::threshold_resample_mask(&hi_res_mask, hi_res_w, hi_res_h, contour_w, contour_h);
+        let mut polygon =
+            Self::extract_largest_contour(&contour_mask, contour_w as u32, contour_h as u32);
 
-        let scale_x = hi_res_w as f32 / original_width as f32;
-        let scale_y = hi_res_h as f32 / original_height as f32;
+        if contour_w as u32 != original_width || contour_h as u32 != original_height {
+            let scale_x = original_width as f32 / contour_w as f32;
+            let scale_y = original_height as f32 / contour_h as f32;
+            for point in &mut polygon {
+                point[0] *= scale_x;
+                point[1] *= scale_y;
+            }
+        }
 
-        for y in 0..original_height {
-            for x in 0..original_width {
-                // Bilinear sample from hi-res mask for smooth edges
-                let src_x = x as f32 * scale_x;
-                let src_y = y as f32 * scale_y;
+        // Step 3: Optional full-size binary mask generation.
+        // This is disabled by default because protocol consumers currently only
+        // use polygons and IoU scores.
+        let binary_mask = if EMIT_BINARY_MASKS {
+            Self::threshold_resample_mask(
+                &hi_res_mask,
+                hi_res_w,
+                hi_res_h,
+                original_width as usize,
+                original_height as usize,
+            )
+        } else {
+            Vec::new()
+        };
 
-                let value = bilinear_sample(&hi_res_mask, hi_res_w, hi_res_h, src_x, src_y);
+        (binary_mask, polygon)
+    }
 
-                // Threshold at 0 (logits)
+    /// Threshold and resample a float logit mask into binary 0/255 values.
+    ///
+    /// Uses nearest-neighbor sampling for speed because this path is used in
+    /// CPU postprocessing hot loops.
+    fn threshold_resample_mask(
+        src: &[f32],
+        src_w: usize,
+        src_h: usize,
+        dst_w: usize,
+        dst_h: usize,
+    ) -> Vec<u8> {
+        let mut dst = vec![0u8; pixel_count(dst_w, dst_h)];
+        if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+            return dst;
+        }
+
+        if src_w == dst_w && src_h == dst_h {
+            for (out, &value) in dst.iter_mut().zip(src.iter()) {
                 if value > 0.0 {
-                    binary_mask[(y * original_width + x) as usize] = 255;
+                    *out = 255;
+                }
+            }
+            return dst;
+        }
+
+        let scale_x = src_w as f32 / dst_w as f32;
+        let scale_y = src_h as f32 / dst_h as f32;
+        let max_x = (src_w.saturating_sub(1)) as isize;
+        let max_y = (src_h.saturating_sub(1)) as isize;
+
+        for y in 0..dst_h {
+            let src_y = (((y as f32 + 0.5) * scale_y - 0.5).round() as isize).clamp(0, max_y);
+            let src_row = src_y as usize * src_w;
+            let dst_row = y * dst_w;
+
+            for x in 0..dst_w {
+                let src_x = (((x as f32 + 0.5) * scale_x - 0.5).round() as isize).clamp(0, max_x);
+                if src[src_row + src_x as usize] > 0.0 {
+                    dst[dst_row + x] = 255;
                 }
             }
         }
 
-        // Extract contour from largest connected component only
-        let polygon = Self::extract_largest_contour(&binary_mask, original_width, original_height);
-
-        (binary_mask, polygon)
+        dst
     }
 
     /// Bilinear upsample a 2D float array.
@@ -608,6 +691,7 @@ impl SamBackend for OnnxSamEngine {
             let mut decoder_guard = decoder.blocking_lock();
 
             // Run decoder with all required inputs
+            let decoder_start = std::time::Instant::now();
             let outputs = decoder_guard.run(ort::inputs![
                 "image_embed" => image_embed_tensor,
                 "high_res_feats_0" => high_res_0_tensor,
@@ -617,6 +701,7 @@ impl SamBackend for OnnxSamEngine {
                 "mask_input" => mask_tensor,
                 "has_mask_input" => has_mask_tensor
             ])?;
+            let decoder_ms = decoder_start.elapsed().as_millis();
 
             // Extract masks and scores
             let masks_value = outputs.get("masks").context("Missing masks output")?;
@@ -646,10 +731,11 @@ impl SamBackend for OnnxSamEngine {
             };
 
             log::debug!(
-                "Decoder output: {} masks of size {}x{}",
+                "Decoder output: {} masks of size {}x{} (onnx run {}ms)",
                 num_masks,
                 mask_w,
-                mask_h
+                mask_h,
+                decoder_ms
             );
 
             let mask_pixels = mask_h * mask_w;
@@ -659,10 +745,12 @@ impl SamBackend for OnnxSamEngine {
             let mut result_polygons = Vec::new();
             let mut result_scores = Vec::new();
 
+            let postprocess_start = std::time::Instant::now();
             for i in 0..num_masks {
                 let mask_offset = i * mask_pixels;
                 let mask_slice = &masks_data[mask_offset..mask_offset + mask_pixels];
 
+                let mask_post_start = std::time::Instant::now();
                 let (binary_mask, polygon) = Self::postprocess_mask(
                     mask_slice,
                     mask_w,
@@ -670,11 +758,24 @@ impl SamBackend for OnnxSamEngine {
                     original_width,
                     original_height,
                 );
+                let mask_post_ms = mask_post_start.elapsed().as_millis();
+                log::debug!(
+                    "Postprocessed SAM mask {} in {}ms ({} polygon points)",
+                    i,
+                    mask_post_ms,
+                    polygon.len()
+                );
 
                 result_masks.push(binary_mask);
                 result_polygons.push(polygon);
                 result_scores.push(scores_data[i]);
             }
+
+            log::debug!(
+                "SAM mask postprocess complete: {} masks in {}ms",
+                num_masks,
+                postprocess_start.elapsed().as_millis()
+            );
 
             Ok(SamMaskResult {
                 masks: result_masks,
@@ -694,8 +795,40 @@ impl SamBackend for OnnxSamEngine {
 
 /// Try to auto-detect the best available execution provider.
 pub fn detect_best_provider() -> ExecutionProvider {
-    // For now, just return CPU since GPU features require cargo features
-    // In the future, we can add runtime detection
-    log::info!("Using CPU execution provider (GPU requires feature flags)");
+    fn provider_available<T: OrtExecutionProviderTrait>(provider: &T) -> bool {
+        if !provider.supported_by_platform() {
+            return false;
+        }
+        match provider.is_available() {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!(
+                    "Provider availability check failed for {}: {}",
+                    provider.name(),
+                    e
+                );
+                false
+            }
+        }
+    }
+
+    if provider_available(&CUDAExecutionProvider::default()) {
+        log::info!("Auto-detected CUDA execution provider");
+        return ExecutionProvider::Cuda;
+    }
+    if provider_available(&ROCmExecutionProvider::default()) {
+        log::info!("Auto-detected ROCm execution provider");
+        return ExecutionProvider::Rocm;
+    }
+    if provider_available(&DirectMLExecutionProvider::default()) {
+        log::info!("Auto-detected DirectML execution provider");
+        return ExecutionProvider::DirectML;
+    }
+    if provider_available(&CoreMLExecutionProvider::default()) {
+        log::info!("Auto-detected CoreML execution provider");
+        return ExecutionProvider::CoreML;
+    }
+
+    log::info!("Falling back to CPU execution provider");
     ExecutionProvider::Cpu
 }

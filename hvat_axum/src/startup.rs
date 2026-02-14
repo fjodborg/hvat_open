@@ -128,6 +128,13 @@ async fn pregenerate_single_image(
         }
         Err(e) => {
             tracing::warn!("  -> Failed to save pyramid: {}", e);
+            if let Err(mark_err) = state
+                .pyramid_storage
+                .mark_failed(&hash, &e.to_string())
+                .await
+            {
+                tracing::warn!("  -> Failed to mark pyramid as failed: {}", mark_err);
+            }
             PregenOutcome::Failed
         }
     }

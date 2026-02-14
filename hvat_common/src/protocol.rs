@@ -170,6 +170,8 @@ pub enum ClientMessage {
     PrepareModel {
         request_id: u32,
         model_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_id: Option<String>,
         #[serde(default)]
         config: Option<serde_json::Value>,
     },
@@ -181,6 +183,8 @@ pub enum ClientMessage {
     Infer {
         request_id: u32,
         model_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_id: Option<String>,
         inputs: serde_json::Value,
         #[serde(default)]
         options: serde_json::Value,
@@ -717,6 +721,7 @@ mod tests {
         let msg = ClientMessage::PrepareModel {
             request_id: 2,
             model_id: "sam-base".to_string(),
+            image_id: None,
             config: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -725,6 +730,7 @@ mod tests {
         let msg = ClientMessage::Infer {
             request_id: 3,
             model_id: "sam-base".to_string(),
+            image_id: None,
             inputs: serde_json::json!({"points": []}),
             options: serde_json::json!({}),
         };

@@ -23,28 +23,69 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::error::Error;
 use crate::packer::{downsample_bands, pack_bands_to_rgba_layers};
 use crate::protocol::{
-    ClientMessage, ErrorCode, PROTOCOL_VERSION, ProtocolError, ServerCapabilities, StreamMetadata,
     encode_capabilities_v2, encode_image_set, encode_infer_progress, encode_infer_result,
     encode_layer_chunk_mux, encode_layer_complete_mux, encode_level_complete_mux,
     encode_model_ready, encode_ping, encode_reset_mux, encode_stream_complete, encode_stream_error,
+    ClientMessage, ErrorCode, ProtocolError, ServerCapabilities, StreamMetadata, PROTOCOL_VERSION,
 };
-use crate::pyramid::{PyramidStatus, compute_image_hash};
+use crate::pyramid::{compute_image_hash, PyramidStatus};
 use crate::state::AppState;
 use crate::utils::find_image;
 
 const YIELD_EVERY_N_CHUNKS: u32 = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SamBands {
+    red: u32,
+    green: u32,
+    blue: u32,
+}
+
+impl SamBands {
+    const fn default_rgb() -> Self {
+        Self {
+            red: 0,
+            green: 1,
+            blue: 2,
+        }
+    }
+
+    fn from_config(config: Option<&serde_json::Value>) -> Self {
+        let Some(cfg) = config else {
+            return Self::default_rgb();
+        };
+
+        let Some(bands) = cfg.get("bands") else {
+            return Self::default_rgb();
+        };
+
+        let red = bands.get("red").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let green = bands.get("green").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+        let blue = bands.get("blue").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+
+        Self { red, green, blue }
+    }
+
+    const fn is_default_rgb(self) -> bool {
+        self.red == 0 && self.green == 1 && self.blue == 2
+    }
+
+    fn embedding_key(self, image_id: &str) -> String {
+        format!("{}#{}:{}:{}", image_id, self.red, self.green, self.blue)
+    }
+}
 
 /// State for a single active stream within a multiplexed connection.
 struct ActiveStream {
@@ -82,6 +123,8 @@ struct ConnectionStreams {
     active_image_id: Option<String>,
     /// Cached RGB image data for inference (avoid reloading for each infer call)
     cached_image: Option<CachedImageData>,
+    /// Prepared embedding dimensions keyed by embedding cache key.
+    prepared_dimensions: HashMap<String, (u32, u32)>,
 }
 
 impl ConnectionStreams {
@@ -92,6 +135,7 @@ impl ConnectionStreams {
             max_streams,
             active_image_id: None,
             cached_image: None,
+            prepared_dimensions: HashMap::new(),
         }
     }
 
@@ -117,6 +161,17 @@ impl ConnectionStreams {
             width,
             height,
         });
+    }
+
+    /// Record dimensions for a prepared embedding key.
+    fn cache_prepared_dimensions(&mut self, embedding_key: String, width: u32, height: u32) {
+        self.prepared_dimensions
+            .insert(embedding_key, (width, height));
+    }
+
+    /// Read dimensions for a prepared embedding key.
+    fn prepared_dimensions(&self, embedding_key: &str) -> Option<(u32, u32)> {
+        self.prepared_dimensions.get(embedding_key).copied()
     }
 
     /// Get cached image data if available and matches the image_id.
@@ -569,6 +624,7 @@ async fn handle_mux_message(
         ClientMessage::PrepareModel {
             request_id,
             model_id,
+            image_id,
             config,
         } => {
             // Spawn prepare_model as a background task to avoid blocking image loading
@@ -583,6 +639,7 @@ async fn handle_mux_message(
                     tx_clone,
                     request_id,
                     model_id,
+                    image_id,
                     config,
                     connection_id,
                 )
@@ -593,6 +650,7 @@ async fn handle_mux_message(
         ClientMessage::Infer {
             request_id,
             model_id,
+            image_id,
             inputs,
             options,
         } => {
@@ -609,6 +667,7 @@ async fn handle_mux_message(
                     tx_clone,
                     request_id,
                     model_id,
+                    image_id,
                     inputs,
                     options,
                     connection_id,
@@ -660,13 +719,15 @@ async fn handle_prepare_model(
     tx: mpsc::Sender<Message>,
     request_id: u32,
     model_id: String,
+    image_id: Option<String>,
     config: Option<serde_json::Value>,
     connection_id: u64,
 ) {
     tracing::info!(
-        "Mux connection {}: prepare_model {} with config {:?} (request_id={})",
+        "Mux connection {}: prepare_model {} for {:?} with config {:?} (request_id={})",
         connection_id,
         model_id,
+        image_id,
         config,
         request_id
     );
@@ -705,15 +766,17 @@ async fn handle_prepare_model(
         }
     };
 
-    // Get active image
-    let image_id = {
+    // Resolve image context from explicit image_id or connection state.
+    let image_id = if let Some(explicit_image_id) = image_id {
+        explicit_image_id
+    } else {
         let streams_guard = streams.read().await;
         match streams_guard.active_image() {
             Some(id) => id.to_string(),
             None => {
                 let error = ProtocolError::error(
                     ErrorCode::NoActiveImage,
-                    "No active image set. Call set_image first.",
+                    "No active image set. Provide image_id or call set_image first.",
                 );
                 tx.send(Message::Binary(
                     encode_stream_error(request_id, &error).into(),
@@ -725,19 +788,8 @@ async fn handle_prepare_model(
         }
     };
 
-    // Parse band selection from config (if provided)
-    let (red_band, green_band, blue_band) = if let Some(cfg) = &config {
-        if let Some(bands) = cfg.get("bands") {
-            let red = bands.get("red").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let green = bands.get("green").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-            let blue = bands.get("blue").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
-            (red, green, blue)
-        } else {
-            (0, 1, 2) // Default RGB bands
-        }
-    } else {
-        (0, 1, 2) // Default RGB bands
-    };
+    let bands = SamBands::from_config(config.as_ref());
+    let embedding_key = bands.embedding_key(&image_id);
 
     // Load RGB image data with selected bands
     // Note: We don't cache band-specific extractions because they can vary per request
@@ -745,7 +797,7 @@ async fn handle_prepare_model(
         let streams_guard = streams.read().await;
 
         // Only use cache for default bands [0, 1, 2]
-        let use_cache = red_band == 0 && green_band == 1 && blue_band == 2;
+        let use_cache = bands.is_default_rgb();
 
         if use_cache {
             if let Some(cached) = streams_guard.get_cached_image(&image_id) {
@@ -782,7 +834,7 @@ async fn handle_prepare_model(
         } else {
             drop(streams_guard);
             // Load image with custom band selection (no caching)
-            match load_image_rgb_with_bands(&state, &image_id, red_band, green_band, blue_band)
+            match load_image_rgb_with_bands(&state, &image_id, bands.red, bands.green, bands.blue)
                 .await
             {
                 Ok((rgb, w, h)) => (rgb, w, h),
@@ -790,9 +842,9 @@ async fn handle_prepare_model(
                     tracing::error!(
                         "Failed to load image '{}' with bands [{}, {}, {}]: {}",
                         image_id,
-                        red_band,
-                        green_band,
-                        blue_band,
+                        bands.red,
+                        bands.green,
+                        bands.blue,
                         e
                     );
                     let error = ProtocolError::error(
@@ -812,7 +864,7 @@ async fn handle_prepare_model(
 
     // Prepare embedding
     let image_context = crate::inference::ImageContext {
-        image_id: image_id.clone(),
+        image_id: embedding_key.clone(),
         rgb_data,
         width,
         height,
@@ -828,6 +880,10 @@ async fn handle_prepare_model(
 
     match backend.prepare(&image_context, progress_cb).await {
         Ok(()) => {
+            streams
+                .write()
+                .await
+                .cache_prepared_dimensions(embedding_key, width, height);
             let msg = encode_model_ready(request_id, &model_id);
             tx.send(Message::Binary(msg.into())).await.ok();
             tracing::info!(
@@ -859,6 +915,7 @@ async fn handle_infer(
     tx: mpsc::Sender<Message>,
     request_id: u32,
     model_id: String,
+    image_id: Option<String>,
     inputs: serde_json::Value,
     options: serde_json::Value,
     connection_id: u64,
@@ -915,15 +972,16 @@ async fn handle_infer(
         return;
     }
 
-    // Get active image
-    let image_id = {
+    let image_id = if let Some(explicit_image_id) = image_id {
+        explicit_image_id
+    } else {
         let streams_guard = streams.read().await;
         match streams_guard.active_image() {
             Some(id) => id.to_string(),
             None => {
                 let error = ProtocolError::error(
                     ErrorCode::NoActiveImage,
-                    "No active image set. Call set_image first.",
+                    "No active image set. Provide image_id or call set_image first.",
                 );
                 tx.send(Message::Binary(
                     encode_stream_error(request_id, &error).into(),
@@ -934,12 +992,17 @@ async fn handle_infer(
             }
         }
     };
+    let bands = SamBands::from_config(Some(&options));
+    let embedding_key = bands.embedding_key(&image_id);
 
     // Check if model requires embedding and if it's ready
-    if backend.requires_embedding() && !backend.is_prepared(&image_id).await {
+    if backend.requires_embedding() && !backend.is_prepared(&embedding_key).await {
         let error = ProtocolError::error(
             ErrorCode::EmbeddingRequired,
-            "Model embedding not ready. Call prepare_model first.",
+            format!(
+                "Model embedding not ready for image '{}' and bands [{}, {}, {}]. Call prepare_model first.",
+                image_id, bands.red, bands.green, bands.blue
+            ),
         );
         tx.send(Message::Binary(
             encode_stream_error(request_id, &error).into(),
@@ -949,22 +1012,90 @@ async fn handle_infer(
         return;
     }
 
-    // Get cached image data (width/height needed even if model uses embeddings)
-    let (rgb_data, width, height) = {
+    let (cache_key, rgb_data, width, height) = if backend.requires_embedding() {
+        // Fast path: for embedding-backed models, infer only needs dimensions.
+        if let Some((w, h)) = streams.read().await.prepared_dimensions(&embedding_key) {
+            (embedding_key.clone(), Vec::new(), w, h)
+        } else if bands.is_default_rgb() {
+            let streams_guard = streams.read().await;
+            if let Some(cached) = streams_guard.get_cached_image(&image_id) {
+                (
+                    embedding_key.clone(),
+                    Vec::new(),
+                    cached.width,
+                    cached.height,
+                )
+            } else {
+                drop(streams_guard);
+                match load_image_rgb(&state, &image_id).await {
+                    Ok((rgb, w, h)) => {
+                        streams
+                            .write()
+                            .await
+                            .cache_image(image_id.clone(), rgb, w, h);
+                        (embedding_key.clone(), Vec::new(), w, h)
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load image '{}': {}", image_id, e);
+                        let error = ProtocolError::error(
+                            ErrorCode::ImageNotFound,
+                            format!("Failed to load image: {}", e),
+                        );
+                        tx.send(Message::Binary(
+                            encode_stream_error(request_id, &error).into(),
+                        ))
+                        .await
+                        .ok();
+                        return;
+                    }
+                }
+            }
+        } else {
+            match load_image_rgb_with_bands(&state, &image_id, bands.red, bands.green, bands.blue)
+                .await
+            {
+                Ok((_rgb, w, h)) => (embedding_key.clone(), Vec::new(), w, h),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to load image '{}' with bands [{}, {}, {}]: {}",
+                        image_id,
+                        bands.red,
+                        bands.green,
+                        bands.blue,
+                        e
+                    );
+                    let error = ProtocolError::error(
+                        ErrorCode::ImageNotFound,
+                        format!("Failed to load image with bands: {}", e),
+                    );
+                    tx.send(Message::Binary(
+                        encode_stream_error(request_id, &error).into(),
+                    ))
+                    .await
+                    .ok();
+                    return;
+                }
+            }
+        }
+    } else {
+        // Generic non-embedding backend path.
         let streams_guard = streams.read().await;
         if let Some(cached) = streams_guard.get_cached_image(&image_id) {
-            (cached.rgb_data.clone(), cached.width, cached.height)
+            (
+                image_id.clone(),
+                cached.rgb_data.clone(),
+                cached.width,
+                cached.height,
+            )
         } else {
             drop(streams_guard);
-            // Load image
             match load_image_rgb(&state, &image_id).await {
                 Ok((rgb, w, h)) => {
-                    // Cache it
                     streams
                         .write()
                         .await
                         .cache_image(image_id.clone(), rgb.clone(), w, h);
-                    (rgb, w, h)
+                    (image_id.clone(), rgb, w, h)
                 }
                 Err(e) => {
                     tracing::error!("Failed to load image '{}': {}", image_id, e);
@@ -985,7 +1116,7 @@ async fn handle_infer(
 
     // Run inference
     let image_context = crate::inference::ImageContext {
-        image_id: image_id.clone(),
+        image_id: cache_key,
         rgb_data,
         width,
         height,
@@ -1341,31 +1472,23 @@ async fn stream_level_mux(
             stream_from_pyramid_mux(&state, tx, request_id, image_hash, level, send_reset).await
         }
         PyramidStatus::Building => {
-            // Send retryable error
-            let (progress, eta_seconds) = state
-                .pyramid_storage
-                .get_progress(image_hash)
-                .await
-                .unwrap_or((0.0, None));
-
-            let error = ProtocolError::retryable(
-                ErrorCode::PyramidNotReady,
-                format!("Pyramid building ({:.0}% complete)", progress * 100.0),
-                5000,
+            tracing::debug!(
+                "Pyramid for '{}' is building; streaming level {} from source",
+                image_id,
+                level
+            );
+            stream_from_source_mux(
+                &state,
+                tx,
+                request_id,
+                image_path,
+                image_id,
+                level,
+                full_width,
+                full_height,
+                send_reset,
             )
-            .with_context(hvat_common::ErrorContext::Pyramid {
-                image_id: image_id.to_string(),
-                progress: Some(progress),
-                eta_seconds,
-            });
-
-            tx.send(Message::Binary(
-                encode_stream_error(request_id, &error).into(),
-            ))
             .await
-            .map_err(|_| Error::Internal("Failed to send error".to_string()))?;
-
-            Ok(())
         }
         _ => {
             // Stream from source and trigger pyramid build

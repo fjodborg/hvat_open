@@ -6,6 +6,10 @@ license = "AGPL-3.0"
 authors = ["fjodborg <github.com/fjodborg>"]
 description = "HVAT API server for hyperspectral image streaming and annotation sync"
 
+[features]
+default = []
+sam-cuda = ["ort/cuda"]
+
 [dependencies]
 # Shared utilities
 hvat_common = { path = "../hvat_common" }
