@@ -43,8 +43,11 @@ async fn main() -> anyhow::Result<()> {
     // Create application state
     let state = Arc::new(AppState::new(config.clone()));
 
-    // Pre-generate pyramids/thumbnails for all images
-    pregenerate_pyramids(state.clone()).await;
+    // Pre-generate pyramids/thumbnails in background so startup is non-blocking.
+    let pregen_state = state.clone();
+    tokio::spawn(async move {
+        pregenerate_pyramids(pregen_state).await;
+    });
 
     // Build CORS layer for development
     let cors = CorsLayer::new()

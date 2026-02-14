@@ -26,6 +26,13 @@ struct TestContext {
     test_image_id: String,
 }
 
+impl TestContext {
+    fn assert_temp_dirs_alive(&self) {
+        assert!(self.temp_dir.path().exists());
+        assert!(self.cache_dir.path().exists());
+    }
+}
+
 /// Create a simple PNG image (10x10 red) for testing using the image crate.
 fn create_test_png() -> Vec<u8> {
     let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(10, 10, |_x, _y| {
@@ -66,6 +73,7 @@ async fn setup_test_server() -> TestContext {
         ping_interval_secs: 30,
         connection_timeout_secs: 90,
         stream_chunk_rows: 128,
+        pyramid_concurrency: 2,
         project_name: "test_project".to_string(),
         sam_enabled: false,
         sam_model_dir: PathBuf::from("./.cache/models"),
@@ -96,12 +104,14 @@ async fn setup_test_server() -> TestContext {
     // Give server time to start
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    TestContext {
+    let ctx = TestContext {
         temp_dir: temp_dir,
         cache_dir: cache_dir,
         addr,
         test_image_id: "test_image_png".to_string(),
-    }
+    };
+    ctx.assert_temp_dirs_alive();
+    ctx
 }
 
 #[tokio::test]
@@ -183,6 +193,7 @@ async fn test_sam_enabled_but_models_missing_should_error() {
         ping_interval_secs: 30,
         connection_timeout_secs: 90,
         stream_chunk_rows: 128,
+        pyramid_concurrency: 2,
         project_name: "test_input".to_string(),
         sam_enabled: true, // <-- USER ENABLED SAM
         sam_model_dir: std::path::PathBuf::from("/nonexistent/path/to/models"), // Models don't exist
@@ -216,6 +227,7 @@ async fn start_test_server_with_sam() -> Option<SocketAddr> {
         ping_interval_secs: 30,
         connection_timeout_secs: 90,
         stream_chunk_rows: 128,
+        pyramid_concurrency: 2,
         project_name: "test_input".to_string(),
         sam_enabled: true,
         sam_model_dir: model_dir,
@@ -433,6 +445,7 @@ async fn test_progressive_streaming_sends_multiple_levels() {
         ping_interval_secs: 30,
         connection_timeout_secs: 90,
         stream_chunk_rows: 128,
+        pyramid_concurrency: 2,
         project_name: "test_project".to_string(),
         sam_enabled: false,
         sam_model_dir: PathBuf::from("./.cache/models"),

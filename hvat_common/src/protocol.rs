@@ -717,6 +717,7 @@ mod tests {
         let msg = ClientMessage::PrepareModel {
             request_id: 2,
             model_id: "sam-base".to_string(),
+            config: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"action\":\"prepare_model\""));

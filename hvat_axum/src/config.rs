@@ -53,6 +53,10 @@ pub struct CliArgs {
     #[arg(long, default_value = "128", env = "HVAT_CHUNK_ROWS")]
     pub chunk_rows: u32,
 
+    /// Maximum concurrent pyramid pre-generation jobs at startup
+    #[arg(long, default_value = "2", env = "HVAT_PYRAMID_CONCURRENCY")]
+    pub pyramid_concurrency: usize,
+
     /// Project name (display name for this server/data directory).
     /// Defaults to the data directory name.
     #[arg(short = 'n', long, env = "HVAT_PROJECT_NAME")]
@@ -113,6 +117,9 @@ pub struct ServerConfig {
     /// Number of rows to send per WebSocket message
     pub stream_chunk_rows: u32,
 
+    /// Maximum concurrent pyramid pre-generation jobs at startup
+    pub pyramid_concurrency: usize,
+
     /// Project name (display name)
     pub project_name: String,
 
@@ -146,6 +153,7 @@ impl Default for ServerConfig {
             ping_interval_secs: 30,
             connection_timeout_secs: 90,
             stream_chunk_rows: 128,
+            pyramid_concurrency: 2,
             project_name: "data".to_string(),
             // SAM defaults
             sam_enabled: false,
@@ -202,6 +210,7 @@ impl ServerConfig {
             ping_interval_secs: args.ping_interval,
             connection_timeout_secs: args.connection_timeout,
             stream_chunk_rows: args.chunk_rows,
+            pyramid_concurrency: args.pyramid_concurrency.max(1),
             project_name,
             // SAM
             sam_enabled: args.sam_enabled,

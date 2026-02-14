@@ -44,6 +44,8 @@ use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::state::AppState;
 use crate::utils::find_image;
 
+const YIELD_EVERY_N_CHUNKS: u32 = 8;
+
 /// State for a single active stream within a multiplexed connection.
 struct ActiveStream {
     /// Task handle for the streaming coroutine
@@ -1441,6 +1443,7 @@ async fn stream_from_pyramid_mux(
         let bytes_per_row = (level_info.width * 4) as usize;
         let total_rows = level_info.height;
         let mut row = 0u32;
+        let mut chunks_since_yield = 0u32;
 
         while row < total_rows {
             let rows_to_send = chunk_rows.min(total_rows - row);
@@ -1461,7 +1464,11 @@ async fn stream_from_pyramid_mux(
             }
 
             row += rows_to_send;
-            tokio::task::yield_now().await;
+            chunks_since_yield += 1;
+            if chunks_since_yield >= YIELD_EVERY_N_CHUNKS {
+                chunks_since_yield = 0;
+                tokio::task::yield_now().await;
+            }
         }
 
         let msg = encode_layer_complete_mux(request_id, layer_idx as u16);
@@ -1533,6 +1540,7 @@ async fn stream_from_source_mux(
         let bytes_per_row = (bands.width * 4) as usize;
         let total_rows = bands.height;
         let mut row = 0u32;
+        let mut chunks_since_yield = 0u32;
 
         while row < total_rows {
             let rows_to_send = chunk_rows.min(total_rows - row);
@@ -1553,7 +1561,11 @@ async fn stream_from_source_mux(
             }
 
             row += rows_to_send;
-            tokio::task::yield_now().await;
+            chunks_since_yield += 1;
+            if chunks_since_yield >= YIELD_EVERY_N_CHUNKS {
+                chunks_since_yield = 0;
+                tokio::task::yield_now().await;
+            }
         }
 
         let msg = encode_layer_complete_mux(request_id, layer_idx as u16);
