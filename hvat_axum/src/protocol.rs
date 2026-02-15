@@ -355,8 +355,14 @@ mod tests {
         );
         assert_eq!(
             u64::from_le_bytes([
-                encoded[6], encoded[7], encoded[8], encoded[9], encoded[10], encoded[11],
-                encoded[12], encoded[13]
+                encoded[6],
+                encoded[7],
+                encoded[8],
+                encoded[9],
+                encoded[10],
+                encoded[11],
+                encoded[12],
+                encoded[13]
             ]),
             timestamp
         );

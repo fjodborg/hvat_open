@@ -117,6 +117,13 @@ struct CachedImageData {
     height: u32,
 }
 
+#[derive(Clone, Copy)]
+struct PreparedDimensionsEntry {
+    width: u32,
+    height: u32,
+    last_access_tick: u64,
+}
+
 /// State for an active inference task.
 struct ActiveInference {
     /// Task handle for the inference coroutine
@@ -131,6 +138,50 @@ struct ActivePrepare {
     task: JoinHandle<()>,
     /// Model ID being prepared
     model_id: String,
+}
+
+#[derive(Clone)]
+struct MuxRequestCtx {
+    state: Arc<AppState>,
+    streams: Arc<RwLock<ConnectionStreams>>,
+    tx: mpsc::Sender<Message>,
+    connection_id: u64,
+}
+
+struct PrepareModelRequest {
+    request_id: u32,
+    model_id: String,
+    image_id: Option<String>,
+    config: Option<serde_json::Value>,
+}
+
+struct InferModelRequest {
+    request_id: u32,
+    model_id: String,
+    image_id: Option<String>,
+    inputs: serde_json::Value,
+    options: serde_json::Value,
+}
+
+#[derive(Clone, Copy)]
+struct StreamLevelRequest<'a> {
+    image_id: &'a str,
+    image_path: &'a Path,
+    image_hash: &'a str,
+    level: u32,
+    full_width: u32,
+    full_height: u32,
+    send_reset: bool,
+}
+
+#[derive(Clone, Copy)]
+struct StreamSourceRequest<'a> {
+    image_path: &'a Path,
+    image_id: &'a str,
+    level: u32,
+    full_width: u32,
+    full_height: u32,
+    send_reset: bool,
 }
 
 /// Manages all active streams for a single WebSocket connection.
@@ -150,7 +201,8 @@ struct ConnectionStreams {
     /// Cached RGB image data for inference (avoid reloading for each infer call)
     cached_image: Option<CachedImageData>,
     /// Prepared embedding dimensions keyed by embedding cache key.
-    prepared_dimensions: HashMap<String, (u32, u32)>,
+    prepared_dimensions: HashMap<String, PreparedDimensionsEntry>,
+    prepared_dimensions_tick: u64,
 }
 
 impl ConnectionStreams {
@@ -164,6 +216,7 @@ impl ConnectionStreams {
             active_image_id: None,
             cached_image: None,
             prepared_dimensions: HashMap::new(),
+            prepared_dimensions_tick: 0,
         }
     }
 
@@ -173,9 +226,6 @@ impl ConnectionStreams {
         if self.active_image_id.as_ref() != Some(&image_id) {
             self.cached_image = None;
         }
-        let keep_prefix = format!("{}#", image_id);
-        self.prepared_dimensions
-            .retain(|key, _| key.starts_with(&keep_prefix));
         self.active_image_id = Some(image_id);
     }
 
@@ -194,27 +244,49 @@ impl ConnectionStreams {
         });
     }
 
-    /// Record dimensions for a prepared embedding key.
-    fn cache_prepared_dimensions(&mut self, embedding_key: String, width: u32, height: u32) {
-        self.prepared_dimensions
-            .insert(embedding_key, (width, height));
-        if self.prepared_dimensions.len() > MAX_PREPARED_DIMENSIONS {
-            let overflow = self.prepared_dimensions.len() - MAX_PREPARED_DIMENSIONS;
-            let keys_to_drop: Vec<String> = self
+    fn next_prepared_dimensions_tick(&mut self) -> u64 {
+        self.prepared_dimensions_tick = self.prepared_dimensions_tick.wrapping_add(1);
+        self.prepared_dimensions_tick
+    }
+
+    fn evict_prepared_dimensions_if_needed(&mut self) {
+        while self.prepared_dimensions.len() > MAX_PREPARED_DIMENSIONS {
+            let oldest_key = self
                 .prepared_dimensions
-                .keys()
-                .take(overflow)
-                .cloned()
-                .collect();
-            for key in keys_to_drop {
-                self.prepared_dimensions.remove(&key);
-            }
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_access_tick)
+                .map(|(key, _)| key.clone());
+
+            let Some(oldest_key) = oldest_key else {
+                break;
+            };
+            self.prepared_dimensions.remove(&oldest_key);
         }
     }
 
-    /// Read dimensions for a prepared embedding key.
-    fn prepared_dimensions(&self, embedding_key: &str) -> Option<(u32, u32)> {
-        self.prepared_dimensions.get(embedding_key).copied()
+    /// Record dimensions for a prepared embedding key.
+    fn cache_prepared_dimensions(&mut self, embedding_key: String, width: u32, height: u32) {
+        let tick = self.next_prepared_dimensions_tick();
+        self.prepared_dimensions.insert(
+            embedding_key,
+            PreparedDimensionsEntry {
+                width,
+                height,
+                last_access_tick: tick,
+            },
+        );
+        self.evict_prepared_dimensions_if_needed();
+    }
+
+    /// Read dimensions for a prepared embedding key and mark as recently used.
+    fn prepared_dimensions(&mut self, embedding_key: &str) -> Option<(u32, u32)> {
+        let tick = self.next_prepared_dimensions_tick();
+        self.prepared_dimensions
+            .get_mut(embedding_key)
+            .map(|entry| {
+                entry.last_access_tick = tick;
+                (entry.width, entry.height)
+            })
     }
 
     /// Get cached image data if available and matches the image_id.
@@ -713,14 +785,18 @@ async fn handle_mux_message(
 
             let task = tokio::spawn(async move {
                 handle_prepare_model(
-                    state_clone,
-                    streams_clone.clone(),
-                    tx_clone,
-                    request_id,
-                    model_id,
-                    image_id,
-                    config,
-                    connection_id,
+                    MuxRequestCtx {
+                        state: state_clone,
+                        streams: streams_clone.clone(),
+                        tx: tx_clone,
+                        connection_id,
+                    },
+                    PrepareModelRequest {
+                        request_id,
+                        model_id,
+                        image_id,
+                        config,
+                    },
                 )
                 .await;
 
@@ -776,15 +852,19 @@ async fn handle_mux_message(
 
             let task = tokio::spawn(async move {
                 handle_infer(
-                    state_clone,
-                    streams_clone.clone(),
-                    tx_clone,
-                    request_id,
-                    model_id,
-                    image_id,
-                    inputs,
-                    options,
-                    connection_id,
+                    MuxRequestCtx {
+                        state: state_clone,
+                        streams: streams_clone.clone(),
+                        tx: tx_clone,
+                        connection_id,
+                    },
+                    InferModelRequest {
+                        request_id,
+                        model_id,
+                        image_id,
+                        inputs,
+                        options,
+                    },
                 )
                 .await;
 
@@ -827,16 +907,20 @@ async fn handle_mux_message(
 }
 
 /// Handle prepare_model request.
-async fn handle_prepare_model(
-    state: Arc<AppState>,
-    streams: Arc<RwLock<ConnectionStreams>>,
-    tx: mpsc::Sender<Message>,
-    request_id: u32,
-    model_id: String,
-    image_id: Option<String>,
-    config: Option<serde_json::Value>,
-    connection_id: u64,
-) {
+async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) {
+    let MuxRequestCtx {
+        state,
+        streams,
+        tx,
+        connection_id,
+    } = ctx;
+    let PrepareModelRequest {
+        request_id,
+        model_id,
+        image_id,
+        config,
+    } = request;
+
     tracing::info!(
         "Mux connection {}: prepare_model {} for {:?} with config {:?} (request_id={})",
         connection_id,
@@ -1064,17 +1148,21 @@ async fn handle_prepare_model(
 }
 
 /// Handle infer request.
-async fn handle_infer(
-    state: Arc<AppState>,
-    streams: Arc<RwLock<ConnectionStreams>>,
-    tx: mpsc::Sender<Message>,
-    request_id: u32,
-    model_id: String,
-    image_id: Option<String>,
-    inputs: serde_json::Value,
-    options: serde_json::Value,
-    connection_id: u64,
-) {
+async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
+    let MuxRequestCtx {
+        state,
+        streams,
+        tx,
+        connection_id,
+    } = ctx;
+    let InferModelRequest {
+        request_id,
+        model_id,
+        image_id,
+        inputs,
+        options,
+    } = request;
+
     tracing::debug!(
         "Mux connection {}: infer {} (request_id={})",
         connection_id,
@@ -1214,7 +1302,7 @@ async fn handle_infer(
 
     let (cache_key, rgb_data, width, height) = if backend.requires_embedding() {
         // Fast path: for embedding-backed models, infer only needs dimensions.
-        if let Some((w, h)) = streams.read().await.prepared_dimensions(&embedding_key) {
+        if let Some((w, h)) = streams.write().await.prepared_dimensions(&embedding_key) {
             (embedding_key.clone(), Vec::new(), w, h)
         } else if resolved_bands.is_default_rgb() {
             let streams_guard = streams.read().await;
@@ -1646,13 +1734,15 @@ async fn stream_image_mux(
                 state.clone(),
                 &tx,
                 request_id,
-                image_id,
-                &image_path,
-                &image_hash,
-                current_level,
-                full_width,
-                full_height,
-                send_reset,
+                StreamLevelRequest {
+                    image_id,
+                    image_path: &image_path,
+                    image_hash: &image_hash,
+                    level: current_level,
+                    full_width,
+                    full_height,
+                    send_reset,
+                },
             )
             .await?;
         }
@@ -1662,13 +1752,15 @@ async fn stream_image_mux(
             state.clone(),
             &tx,
             request_id,
-            image_id,
-            &image_path,
-            &image_hash,
-            target_level,
-            full_width,
-            full_height,
-            true,
+            StreamLevelRequest {
+                image_id,
+                image_path: &image_path,
+                image_hash: &image_hash,
+                level: target_level,
+                full_width,
+                full_height,
+                send_reset: true,
+            },
         )
         .await?;
     }
@@ -1687,14 +1779,18 @@ async fn stream_level_mux(
     state: Arc<AppState>,
     tx: &mpsc::Sender<Message>,
     request_id: u32,
-    image_id: &str,
-    image_path: &Path,
-    image_hash: &str,
-    level: u32,
-    full_width: u32,
-    full_height: u32,
-    send_reset: bool,
+    request: StreamLevelRequest<'_>,
 ) -> Result<(), Error> {
+    let StreamLevelRequest {
+        image_id,
+        image_path,
+        image_hash,
+        level,
+        full_width,
+        full_height,
+        send_reset,
+    } = request;
+
     let pyramid_status = state.pyramid_storage.get_status(image_hash).await;
 
     match pyramid_status {
@@ -1711,33 +1807,39 @@ async fn stream_level_mux(
                 &state,
                 tx,
                 request_id,
-                image_path,
-                image_id,
-                level,
-                full_width,
-                full_height,
-                send_reset,
+                StreamSourceRequest {
+                    image_path,
+                    image_id,
+                    level,
+                    full_width,
+                    full_height,
+                    send_reset,
+                },
             )
             .await
         }
         _ => {
             // Stream from source and trigger pyramid build
-            if pyramid_status == PyramidStatus::Pending || pyramid_status == PyramidStatus::Failed {
-                if !state.pyramid_tasks.read().await.contains_key(image_hash) {
-                    spawn_pyramid_task(state.clone(), image_path, image_hash).await;
-                }
+            if matches!(
+                pyramid_status,
+                PyramidStatus::Pending | PyramidStatus::Failed
+            ) && !state.pyramid_tasks.read().await.contains_key(image_hash)
+            {
+                spawn_pyramid_task(state.clone(), image_path, image_hash).await;
             }
 
             stream_from_source_mux(
                 &state,
                 tx,
                 request_id,
-                image_path,
-                image_id,
-                level,
-                full_width,
-                full_height,
-                send_reset,
+                StreamSourceRequest {
+                    image_path,
+                    image_id,
+                    level,
+                    full_width,
+                    full_height,
+                    send_reset,
+                },
             )
             .await
         }
@@ -1841,13 +1943,17 @@ async fn stream_from_source_mux(
     state: &AppState,
     tx: &mpsc::Sender<Message>,
     request_id: u32,
-    image_path: &Path,
-    image_id: &str,
-    level: u32,
-    full_width: u32,
-    full_height: u32,
-    send_reset: bool,
+    request: StreamSourceRequest<'_>,
 ) -> Result<(), Error> {
+    let StreamSourceRequest {
+        image_path,
+        image_id,
+        level,
+        full_width,
+        full_height,
+        send_reset,
+    } = request;
+
     let loader = state
         .loaders
         .find_loader(image_path)
@@ -1974,5 +2080,42 @@ fn build_server_capabilities(state: &AppState) -> ServerCapabilities {
         } else {
             vec![]
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_dimensions_eviction_is_lru_by_access() {
+        let mut streams = ConnectionStreams::new(4, 2);
+
+        for i in 0..MAX_PREPARED_DIMENSIONS {
+            streams.cache_prepared_dimensions(format!("k{}", i), i as u32, i as u32);
+        }
+
+        // Touch k0 so it is no longer the least-recently-used entry.
+        assert_eq!(streams.prepared_dimensions("k0"), Some((0, 0)));
+
+        // Insert one more key and ensure k1 (the true LRU) is evicted.
+        streams.cache_prepared_dimensions("k_new".to_string(), 999, 999);
+        assert!(streams.prepared_dimensions("k1").is_none());
+        assert_eq!(streams.prepared_dimensions("k0"), Some((0, 0)));
+        assert_eq!(streams.prepared_dimensions("k_new"), Some((999, 999)));
+        assert_eq!(streams.prepared_dimensions.len(), MAX_PREPARED_DIMENSIONS);
+    }
+
+    #[test]
+    fn set_image_keeps_prepared_dimensions_for_other_images() {
+        let mut streams = ConnectionStreams::new(4, 2);
+        streams.cache_prepared_dimensions("img_a#0:1:2".to_string(), 100, 200);
+        streams.cache_prepared_dimensions("img_b#0:1:2".to_string(), 300, 400);
+
+        streams.set_image("img_a".to_string());
+        streams.set_image("img_b".to_string());
+
+        assert_eq!(streams.prepared_dimensions("img_a#0:1:2"), Some((100, 200)));
+        assert_eq!(streams.prepared_dimensions("img_b#0:1:2"), Some((300, 400)));
     }
 }
