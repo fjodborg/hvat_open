@@ -146,8 +146,8 @@ impl PyramidBuilder {
             }
 
             // Downsample for next level
-            let new_width = (current_bands.width + 1) / 2;
-            let new_height = (current_bands.height + 1) / 2;
+            let new_width = current_bands.width.div_ceil(2);
+            let new_height = current_bands.height.div_ceil(2);
 
             current_bands = downsample_bands(&current_bands, new_width, new_height);
         }

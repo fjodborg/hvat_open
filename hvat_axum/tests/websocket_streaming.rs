@@ -105,8 +105,8 @@ async fn setup_test_server() -> TestContext {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let ctx = TestContext {
-        temp_dir: temp_dir,
-        cache_dir: cache_dir,
+        temp_dir,
+        cache_dir,
         addr,
         test_image_id: "test_image_png".to_string(),
     };

@@ -87,8 +87,9 @@ pub fn pack_bands_to_rgba_layers<B: BandSlice>(
     let num_pixels = (width * height) as usize;
 
     // Calculate number of layers needed (4 bands per layer)
-    let num_layers =
-        ((num_bands + BANDS_PER_LAYER - 1) / BANDS_PER_LAYER).max(MIN_TEXTURE_LAYERS as usize);
+    let num_layers = num_bands
+        .div_ceil(BANDS_PER_LAYER)
+        .max(MIN_TEXTURE_LAYERS as usize);
 
     let mut layers = Vec::with_capacity(num_layers);
 

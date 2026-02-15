@@ -330,10 +330,10 @@ pub fn compute_image_hash(path: &Path) -> Result<String> {
     metadata.len().hash(&mut hasher);
 
     // Hash the modification time if available
-    if let Ok(modified) = metadata.modified() {
-        if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-            duration.as_secs().hash(&mut hasher);
-        }
+    if let Ok(modified) = metadata.modified()
+        && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
+    {
+        duration.as_secs().hash(&mut hasher);
     }
 
     Ok(format!("{:016x}", hasher.finish()))

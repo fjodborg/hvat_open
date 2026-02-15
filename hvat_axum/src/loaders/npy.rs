@@ -105,10 +105,7 @@ fn parse_dtype_from_header(header: &str) -> Result<NpyDtype> {
     // It's between quotes after the colon
     let dtype_str = after_descr
         .split(['\'', '"'])
-        .filter(|s| {
-            s.len() >= 2 && (s.starts_with('<') || s.starts_with('>') || s.starts_with('|'))
-        })
-        .next()
+        .find(|s| s.len() >= 2 && (s.starts_with('<') || s.starts_with('>') || s.starts_with('|')))
         .ok_or_else(|| Error::InvalidImageData("Cannot parse dtype from NPY header".to_string()))?;
 
     // Parse dtype: skip endianness char, then type char + size

@@ -372,8 +372,10 @@ mod tests {
     #[test]
     fn test_version_mismatch_detection() {
         // Create capabilities with a different version
-        let mut caps = ServerCapabilities::default();
-        caps.protocol_version = 99; // Future version
+        let caps = ServerCapabilities {
+            protocol_version: 99,
+            ..ServerCapabilities::default()
+        }; // Future version
 
         // Client checks compatibility
         assert!(!caps.is_compatible(PROTOCOL_VERSION));

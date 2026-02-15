@@ -145,13 +145,13 @@ impl OnnxSamEngine {
         // Convert to float and normalize to [0, 1]
         // SAM expects NCHW format: (1, 3, 1024, 1024)
         let size = SAM_INPUT_SIZE as usize;
-        let mut input = vec![0.0f32; 1 * 3 * size * size];
+        let mut input = vec![0.0f32; 3 * size * size];
 
         for (y, row) in resized.enumerate_rows() {
             for (x, _, pixel) in row {
                 let base = y as usize * size + x as usize;
-                input[0 * size * size + base] = pixel[0] as f32 / 255.0; // R
-                input[1 * size * size + base] = pixel[1] as f32 / 255.0; // G
+                input[base] = pixel[0] as f32 / 255.0; // R
+                input[size * size + base] = pixel[1] as f32 / 255.0; // G
                 input[2 * size * size + base] = pixel[2] as f32 / 255.0; // B
             }
         }
@@ -679,7 +679,7 @@ impl SamBackend for OnnxSamEngine {
             let labels_tensor = Tensor::from_array(([1i64, num_points], point_labels))?;
 
             // Prepare mask input (no previous mask)
-            let mask_input = vec![0.0f32; 1 * 1 * 256 * 256];
+            let mask_input = vec![0.0f32; 256 * 256];
             let mask_tensor = Tensor::from_array(([1i64, 1, 256, 256], mask_input))?;
 
             let has_mask = vec![0.0f32];
@@ -746,7 +746,7 @@ impl SamBackend for OnnxSamEngine {
             let mut result_scores = Vec::new();
 
             let postprocess_start = std::time::Instant::now();
-            for i in 0..num_masks {
+            for (i, score) in scores_data.iter().copied().enumerate().take(num_masks) {
                 let mask_offset = i * mask_pixels;
                 let mask_slice = &masks_data[mask_offset..mask_offset + mask_pixels];
 
@@ -768,7 +768,7 @@ impl SamBackend for OnnxSamEngine {
 
                 result_masks.push(binary_mask);
                 result_polygons.push(polygon);
-                result_scores.push(scores_data[i]);
+                result_scores.push(score);
             }
 
             log::debug!(

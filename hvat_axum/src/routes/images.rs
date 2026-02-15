@@ -271,8 +271,8 @@ fn calculate_pyramid_levels(width: u32, height: u32) -> Vec<PyramidLevel> {
 
     // Generate levels until we reach minimum size (256x256 or smaller)
     while w > 256 || h > 256 {
-        w = (w + 1) / 2; // Round up division
-        h = (h + 1) / 2;
+        w = w.div_ceil(2); // Round up division
+        h = h.div_ceil(2);
         level += 1;
 
         levels.push(PyramidLevel {

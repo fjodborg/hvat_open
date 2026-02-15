@@ -50,7 +50,7 @@ impl BandData {
 
     /// Calculate the number of RGBA texture layers needed (4 bands per layer).
     pub fn num_layers(&self) -> u32 {
-        let layers = (self.bands.len() + 3) / 4;
+        let layers = self.bands.len().div_ceil(4);
         // WebGL2 requires at least 2 layers for array textures
         layers.max(2) as u32
     }

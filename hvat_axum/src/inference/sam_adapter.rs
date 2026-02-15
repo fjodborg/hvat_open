@@ -176,7 +176,7 @@ impl<B: SamBackend + ?Sized + 'static> InferenceBackend for SamInferenceAdapter<
         let flattened_masks: Vec<Vec<f32>> = result
             .polygons
             .into_iter()
-            .map(|polygon| polygon.into_iter().flat_map(|[x, y]| [x, y]).collect())
+            .map(|polygon| polygon.into_iter().flatten().collect())
             .collect();
 
         Ok(InferenceResult {

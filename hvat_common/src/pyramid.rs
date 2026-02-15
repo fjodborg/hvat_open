@@ -128,13 +128,13 @@ impl PyramidLevel {
     /// and refine to full resolution.
     #[inline]
     pub fn iter_to_full_res(self) -> impl Iterator<Item = PyramidLevel> {
-        (0..=self.0).rev().map(|l| PyramidLevel(l))
+        (0..=self.0).rev().map(PyramidLevel)
     }
 
     /// Iterate from full resolution (level 0) up to this level.
     #[inline]
     pub fn iter_from_full_res(self) -> impl Iterator<Item = PyramidLevel> {
-        (0..=self.0).map(|l| PyramidLevel(l))
+        (0..=self.0).map(PyramidLevel)
     }
 }
 

@@ -160,9 +160,7 @@ impl ProtocolError {
             ErrorContext::None
         };
 
-        let message = reader
-            .read_str_lossy(message_len)
-            .unwrap_or_else(String::new);
+        let message = reader.read_str_lossy(message_len).unwrap_or_default();
 
         Some(Self {
             code,
