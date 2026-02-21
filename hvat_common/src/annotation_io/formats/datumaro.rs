@@ -152,6 +152,7 @@ impl AnnotationImporter for DatumaroFormat {
         FormatId::Datumaro
     }
 
+    #[allow(clippy::too_many_lines)]
     fn import(
         &self,
         bundle: &ImportBundle,

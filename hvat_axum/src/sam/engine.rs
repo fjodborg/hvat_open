@@ -642,6 +642,7 @@ impl SamBackend for OnnxSamEngine {
         .await?
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn decode_mask(
         &self,
         encoder_output: &EncoderOutput,

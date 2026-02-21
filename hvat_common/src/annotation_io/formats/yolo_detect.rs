@@ -158,6 +158,7 @@ impl AnnotationImporter for YoloDetectFormat {
         FormatId::YoloDetect
     }
 
+    #[allow(clippy::too_many_lines)]
     fn import(
         &self,
         bundle: &ImportBundle,

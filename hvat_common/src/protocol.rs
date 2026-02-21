@@ -490,17 +490,7 @@ impl ServerCapabilities {
     /// A model is considered SAM-compatible when it accepts `point_list`
     /// inputs and returns `polygon_list` outputs.
     pub fn find_sam_prompt_model(&self) -> Option<&ModelCapability> {
-        self.models.iter().find(|model| {
-            model.model_type == ModelType::Segmentation
-                && model
-                    .inputs
-                    .iter()
-                    .any(|input| input.input_type == "point_list")
-                && model
-                    .outputs
-                    .iter()
-                    .any(|output| output.output_type == "polygon_list")
-        })
+        self.models.iter().find(|model| model.is_sam_compatible())
     }
 
     /// Whether inference is supported.
@@ -612,6 +602,21 @@ pub struct ModelCapability {
     pub requires_embedding: bool,
     #[serde(default)]
     pub embedding_time_ms: u32,
+}
+
+impl ModelCapability {
+    /// Whether this model is SAM-compatible (accepts point prompts, returns polygons).
+    pub fn is_sam_compatible(&self) -> bool {
+        self.model_type == ModelType::Segmentation
+            && self
+                .inputs
+                .iter()
+                .any(|input| input.input_type == "point_list")
+            && self
+                .outputs
+                .iter()
+                .any(|output| output.output_type == "polygon_list")
+    }
 }
 
 #[cfg(test)]

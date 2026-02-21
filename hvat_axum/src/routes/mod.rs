@@ -16,6 +16,7 @@ use crate::state::AppState;
 /// API endpoints:
 /// - `GET /api/info` - Server/project information
 /// - `GET /api/images` - List all images (for tree display)
+/// - `POST /api/images/upload` - Upload images/folders into server data directory
 /// - `GET /api/project-state` - Load saved native project annotations
 /// - `PUT /api/project-state` - Save native project annotations
 /// - `GET /api/images/:id/meta` - Image metadata

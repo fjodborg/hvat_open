@@ -65,6 +65,7 @@ pub async fn pregenerate_pyramids(state: Arc<AppState>) {
     );
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn pregenerate_single_image(
     state: Arc<AppState>,
     data_dir: PathBuf,

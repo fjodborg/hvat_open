@@ -407,6 +407,7 @@ impl ConnectionStreams {
 ///
 /// This is the entry point for the `/api/ws` endpoint. It manages multiple
 /// concurrent image streams over a single WebSocket connection.
+#[allow(clippy::cognitive_complexity)]
 pub async fn handle_websocket_mux(socket: WebSocket, state: Arc<AppState>) {
     // Try to acquire a connection slot
     let connection_id = match state.try_acquire_connection() {
@@ -463,6 +464,7 @@ pub async fn handle_websocket_mux(socket: WebSocket, state: Arc<AppState>) {
 }
 
 /// Inner handler for the multiplexed WebSocket connection.
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 async fn handle_websocket_mux_inner(
     socket: WebSocket,
     state: Arc<AppState>,
@@ -649,168 +651,36 @@ async fn handle_mux_message(
     tx: mpsc::Sender<Message>,
     connection_id: u64,
 ) {
+    let ctx = MuxRequestCtx {
+        state,
+        streams,
+        tx,
+        connection_id,
+    };
+
     match msg {
-        // ====================================================================
-        // Image Context
-        // ====================================================================
         ClientMessage::SetImage {
             request_id,
             image_id,
-        } => {
-            tracing::info!(
-                "Mux connection {}: set_image {} (request_id={})",
-                connection_id,
-                image_id,
-                request_id
-            );
+        } => handle_set_image(&ctx, request_id, image_id).await,
 
-            // Set the active image
-            streams.write().await.set_image(image_id.clone());
-
-            // Send confirmation
-            let msg = encode_image_set(request_id, &image_id);
-            tx.send(Message::Binary(msg.into())).await.ok();
-        }
-
-        // ====================================================================
-        // Streaming
-        // ====================================================================
         ClientMessage::StreamImage {
             request_id,
             level,
             progressive,
-        } => {
-            // Get the active image ID
-            let image_id = {
-                let streams_guard = streams.read().await;
-                match streams_guard.active_image() {
-                    Some(id) => id.to_string(),
-                    None => {
-                        let error = ProtocolError::error(
-                            ErrorCode::NoActiveImage,
-                            "No active image set. Call set_image first.",
-                        );
-                        tx.send(Message::Binary(
-                            encode_stream_error(request_id, &error).into(),
-                        ))
-                        .await
-                        .ok();
-                        return;
-                    }
-                }
-            };
-
-            // Check if we can start a new stream
-            {
-                let streams_guard = streams.read().await;
-                if !streams_guard.can_start_stream() {
-                    let error = ProtocolError::retryable(
-                        ErrorCode::RateLimited,
-                        format!(
-                            "Maximum concurrent streams ({}) reached",
-                            streams_guard.max_streams()
-                        ),
-                        1000,
-                    );
-                    tx.send(Message::Binary(
-                        encode_stream_error(request_id, &error).into(),
-                    ))
-                    .await
-                    .ok();
-                    return;
-                }
-            }
-
-            tracing::info!(
-                "Mux connection {}: stream_image {} (request_id={}, level={}, progressive={})",
-                connection_id,
-                image_id,
-                request_id,
-                level,
-                progressive
-            );
-
-            // Spawn the stream task
-            let task = spawn_stream_task(
-                state.clone(),
-                streams.clone(),
-                tx.clone(),
-                request_id,
-                image_id.clone(),
-                level,
-                progressive,
-            );
-
-            // Register the stream
-            streams
-                .write()
-                .await
-                .insert(request_id, ActiveStream { task, image_id });
-        }
+        } => handle_stream_image(&ctx, request_id, level, progressive).await,
 
         ClientMessage::CancelStream { request_id } => {
-            let cancelled = streams.write().await.cancel(request_id);
-            if cancelled {
-                tracing::info!(
-                    "Mux connection {}: cancelled stream {}",
-                    connection_id,
-                    request_id
-                );
-            } else {
-                tracing::debug!(
-                    "Mux connection {}: stream {} not found (already complete?)",
-                    connection_id,
-                    request_id
-                );
-            }
+            handle_cancel_stream(&ctx, request_id).await
         }
 
-        // ====================================================================
-        // Model Inference
-        // ====================================================================
         ClientMessage::PrepareModel {
             request_id,
             model_id,
             image_id,
             config,
         } => {
-            // Keep only the newest prepare task. Stale preloads are low priority.
-            streams.write().await.cancel_all_prepares();
-
-            // Spawn prepare_model as a tracked task so stale prepares can be aborted.
-            let state_clone = state.clone();
-            let streams_clone = streams.clone();
-            let tx_clone = tx.clone();
-            let model_id_for_tracking = model_id.clone();
-
-            let task = tokio::spawn(async move {
-                handle_prepare_model(
-                    MuxRequestCtx {
-                        state: state_clone,
-                        streams: streams_clone.clone(),
-                        tx: tx_clone,
-                        connection_id,
-                    },
-                    PrepareModelRequest {
-                        request_id,
-                        model_id,
-                        image_id,
-                        config,
-                    },
-                )
-                .await;
-
-                // Remove from tracking when complete
-                streams_clone.write().await.remove_prepare(request_id);
-            });
-
-            streams.write().await.insert_prepare(
-                request_id,
-                ActivePrepare {
-                    task,
-                    model_id: model_id_for_tracking,
-                },
-            );
+            spawn_prepare_model_task(&ctx, request_id, model_id, image_id, config).await
         }
 
         ClientMessage::Infer {
@@ -819,647 +689,588 @@ async fn handle_mux_message(
             image_id,
             inputs,
             options,
-        } => {
-            let max_inferences_reached = {
-                let mut streams_guard = streams.write().await;
-                if !streams_guard.can_start_inference() {
-                    Some(streams_guard.max_inferences())
-                } else {
-                    // Prioritize active inference over preloading prepares.
-                    streams_guard.cancel_all_prepares();
-                    None
-                }
-            };
-            if let Some(max_inferences) = max_inferences_reached {
-                let error = ProtocolError::retryable(
-                    ErrorCode::ModelBusy,
-                    format!("Maximum concurrent inferences ({}) reached", max_inferences),
-                    100,
-                );
-                tx.send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await
-                .ok();
-                return;
-            }
-
-            // Spawn inference as a tracked task so it can be cancelled
-            let state_clone = state.clone();
-            let streams_clone = streams.clone();
-            let tx_clone = tx.clone();
-            let model_id_for_tracking = model_id.clone();
-
-            let task = tokio::spawn(async move {
-                handle_infer(
-                    MuxRequestCtx {
-                        state: state_clone,
-                        streams: streams_clone.clone(),
-                        tx: tx_clone,
-                        connection_id,
-                    },
-                    InferModelRequest {
-                        request_id,
-                        model_id,
-                        image_id,
-                        inputs,
-                        options,
-                    },
-                )
-                .await;
-
-                // Remove from tracking when complete
-                streams_clone.write().await.remove_inference(request_id);
-            });
-
-            // Track the inference task
-            streams.write().await.insert_inference(
-                request_id,
-                ActiveInference {
-                    task,
-                    model_id: model_id_for_tracking,
-                },
-            );
-        }
+        } => spawn_infer_task(&ctx, request_id, model_id, image_id, inputs, options).await,
 
         ClientMessage::CancelInfer { request_id } => {
-            tracing::info!(
-                "Mux connection {}: cancel_infer (request_id={})",
-                connection_id,
-                request_id
-            );
-            // Cancel the inference task if it exists
-            let cancelled = streams.write().await.cancel_inference(request_id);
-            if cancelled {
-                tracing::debug!("Inference task {} cancelled successfully", request_id);
-            } else {
-                tracing::debug!(
-                    "Inference task {} not found (may have already completed)",
-                    request_id
-                );
-            }
+            handle_cancel_infer(&ctx, request_id).await
         }
 
-        ClientMessage::Pong { .. } => {
-            // Handled in the main receive loop
+        ClientMessage::Pong { .. } => {} // Handled in the main receive loop
+    }
+}
+
+async fn handle_set_image(ctx: &MuxRequestCtx, request_id: u32, image_id: String) {
+    tracing::info!(
+        "Mux connection {}: set_image {} (request_id={})",
+        ctx.connection_id,
+        image_id,
+        request_id
+    );
+    ctx.streams.write().await.set_image(image_id.clone());
+    let msg = encode_image_set(request_id, &image_id);
+    ctx.tx.send(Message::Binary(msg.into())).await.ok();
+}
+
+async fn handle_stream_image(
+    ctx: &MuxRequestCtx,
+    request_id: u32,
+    level: u32,
+    progressive: bool,
+) {
+    let image_id = {
+        let streams_guard = ctx.streams.read().await;
+        match streams_guard.active_image() {
+            Some(id) => id.to_string(),
+            None => {
+                send_error(&ctx.tx, request_id, ErrorCode::NoActiveImage, "No active image set. Call set_image first.").await;
+                return;
+            }
+        }
+    };
+
+    {
+        let streams_guard = ctx.streams.read().await;
+        if !streams_guard.can_start_stream() {
+            let error = ProtocolError::retryable(
+                ErrorCode::RateLimited,
+                format!(
+                    "Maximum concurrent streams ({}) reached",
+                    streams_guard.max_streams()
+                ),
+                1000,
+            );
+            ctx.tx
+                .send(Message::Binary(encode_stream_error(request_id, &error).into()))
+                .await
+                .ok();
+            return;
+        }
+    }
+
+    tracing::info!(
+        "Mux connection {}: stream_image {} (request_id={}, level={}, progressive={})",
+        ctx.connection_id,
+        image_id,
+        request_id,
+        level,
+        progressive
+    );
+
+    let task = spawn_stream_task(
+        ctx.state.clone(),
+        ctx.streams.clone(),
+        ctx.tx.clone(),
+        request_id,
+        image_id.clone(),
+        level,
+        progressive,
+    );
+
+    ctx.streams
+        .write()
+        .await
+        .insert(request_id, ActiveStream { task, image_id });
+}
+
+async fn handle_cancel_stream(ctx: &MuxRequestCtx, request_id: u32) {
+    let cancelled = ctx.streams.write().await.cancel(request_id);
+    if cancelled {
+        tracing::info!(
+            "Mux connection {}: cancelled stream {}",
+            ctx.connection_id,
+            request_id
+        );
+    } else {
+        tracing::debug!(
+            "Mux connection {}: stream {} not found (already complete?)",
+            ctx.connection_id,
+            request_id
+        );
+    }
+}
+
+async fn spawn_prepare_model_task(
+    ctx: &MuxRequestCtx,
+    request_id: u32,
+    model_id: String,
+    image_id: Option<String>,
+    config: Option<serde_json::Value>,
+) {
+    // Keep only the newest prepare task. Stale preloads are low priority.
+    ctx.streams.write().await.cancel_all_prepares();
+
+    let state_clone = ctx.state.clone();
+    let streams_clone = ctx.streams.clone();
+    let tx_clone = ctx.tx.clone();
+    let connection_id = ctx.connection_id;
+    let model_id_for_tracking = model_id.clone();
+
+    let task = tokio::spawn(async move {
+        handle_prepare_model(
+            MuxRequestCtx {
+                state: state_clone,
+                streams: streams_clone.clone(),
+                tx: tx_clone,
+                connection_id,
+            },
+            PrepareModelRequest {
+                request_id,
+                model_id,
+                image_id,
+                config,
+            },
+        )
+        .await;
+        streams_clone.write().await.remove_prepare(request_id);
+    });
+
+    ctx.streams.write().await.insert_prepare(
+        request_id,
+        ActivePrepare {
+            task,
+            model_id: model_id_for_tracking,
+        },
+    );
+}
+
+async fn spawn_infer_task(
+    ctx: &MuxRequestCtx,
+    request_id: u32,
+    model_id: String,
+    image_id: Option<String>,
+    inputs: serde_json::Value,
+    options: serde_json::Value,
+) {
+    {
+        let mut streams_guard = ctx.streams.write().await;
+        if !streams_guard.can_start_inference() {
+            let error = ProtocolError::retryable(
+                ErrorCode::ModelBusy,
+                format!(
+                    "Maximum concurrent inferences ({}) reached",
+                    streams_guard.max_inferences()
+                ),
+                100,
+            );
+            ctx.tx
+                .send(Message::Binary(encode_stream_error(request_id, &error).into()))
+                .await
+                .ok();
+            return;
+        }
+        // Prioritize active inference over preloading prepares.
+        streams_guard.cancel_all_prepares();
+    }
+
+    let state_clone = ctx.state.clone();
+    let streams_clone = ctx.streams.clone();
+    let tx_clone = ctx.tx.clone();
+    let connection_id = ctx.connection_id;
+    let model_id_for_tracking = model_id.clone();
+
+    let task = tokio::spawn(async move {
+        handle_infer(
+            MuxRequestCtx {
+                state: state_clone,
+                streams: streams_clone.clone(),
+                tx: tx_clone,
+                connection_id,
+            },
+            InferModelRequest {
+                request_id,
+                model_id,
+                image_id,
+                inputs,
+                options,
+            },
+        )
+        .await;
+        streams_clone.write().await.remove_inference(request_id);
+    });
+
+    ctx.streams.write().await.insert_inference(
+        request_id,
+        ActiveInference {
+            task,
+            model_id: model_id_for_tracking,
+        },
+    );
+}
+
+async fn handle_cancel_infer(ctx: &MuxRequestCtx, request_id: u32) {
+    tracing::info!(
+        "Mux connection {}: cancel_infer (request_id={})",
+        ctx.connection_id,
+        request_id
+    );
+    let cancelled = ctx.streams.write().await.cancel_inference(request_id);
+    if cancelled {
+        tracing::debug!("Inference task {} cancelled successfully", request_id);
+    } else {
+        tracing::debug!(
+            "Inference task {} not found (may have already completed)",
+            request_id
+        );
+    }
+}
+
+/// Send a protocol error to the client (convenience helper).
+async fn send_error(
+    tx: &mpsc::Sender<Message>,
+    request_id: u32,
+    code: ErrorCode,
+    message: impl Into<String>,
+) {
+    let error = ProtocolError::error(code, message);
+    tx.send(Message::Binary(encode_stream_error(request_id, &error).into()))
+        .await
+        .ok();
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers for prepare_model / infer
+// ---------------------------------------------------------------------------
+
+use crate::inference::InferenceBackend;
+
+/// Resolve model registry + backend, sending protocol error on failure.
+async fn resolve_model_backend(
+    state: &AppState,
+    model_id: &str,
+    request_id: u32,
+    tx: &mpsc::Sender<Message>,
+) -> Option<Arc<dyn InferenceBackend>> {
+    let registry = match state.model_registry.as_ref() {
+        Some(r) => r.clone(),
+        None => {
+            send_error(tx, request_id, ErrorCode::ModelNotFound, "No models available on this server").await;
+            return None;
+        }
+    };
+    match registry.get(model_id) {
+        Some(b) => Some(b),
+        None => {
+            send_error(tx, request_id, ErrorCode::ModelNotFound, format!("Model '{}' not found", model_id)).await;
+            None
         }
     }
 }
 
-/// Handle prepare_model request.
-async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) {
-    let MuxRequestCtx {
-        state,
-        streams,
-        tx,
-        connection_id,
-    } = ctx;
-    let PrepareModelRequest {
-        request_id,
-        model_id,
-        image_id,
-        config,
-    } = request;
-
-    tracing::info!(
-        "Mux connection {}: prepare_model {} for {:?} with config {:?} (request_id={})",
-        connection_id,
-        model_id,
-        image_id,
-        config,
-        request_id
-    );
-
-    // Get model registry
-    let registry = match state.model_registry.as_ref() {
-        Some(r) => r.clone(),
+/// Resolve image_id from an explicit parameter or the active connection state.
+async fn resolve_image_id(
+    streams: &RwLock<ConnectionStreams>,
+    explicit: Option<String>,
+    request_id: u32,
+    tx: &mpsc::Sender<Message>,
+) -> Option<String> {
+    if let Some(id) = explicit {
+        return Some(id);
+    }
+    let guard = streams.read().await;
+    match guard.active_image() {
+        Some(id) => Some(id.to_string()),
         None => {
-            let error = ProtocolError::error(
-                ErrorCode::ModelNotFound,
-                "No models available on this server",
-            );
-            tx.send(Message::Binary(
-                encode_stream_error(request_id, &error).into(),
-            ))
-            .await
-            .ok();
-            return;
+            send_error(tx, request_id, ErrorCode::NoActiveImage, "No active image set. Provide image_id or call set_image first.").await;
+            None
         }
-    };
+    }
+}
 
-    // Get the backend
-    let backend = match registry.get(&model_id) {
-        Some(b) => b,
-        None => {
-            let error = ProtocolError::error(
-                ErrorCode::ModelNotFound,
-                format!("Model '{}' not found", model_id),
-            );
-            tx.send(Message::Binary(
-                encode_stream_error(request_id, &error).into(),
-            ))
-            .await
-            .ok();
-            return;
-        }
-    };
+/// Resolved band selection and embedding key for an image.
+struct ResolvedBands {
+    requested: SamBands,
+    resolved: SamBands,
+    embedding_key: String,
+}
 
-    // Resolve image context from explicit image_id or connection state.
-    let image_id = if let Some(explicit_image_id) = image_id {
-        explicit_image_id
+/// Parse and resolve SAM band selection, clamping to the image's actual band count.
+async fn resolve_band_selection(
+    state: &AppState,
+    image_id: &str,
+    config: Option<&serde_json::Value>,
+    request_id: u32,
+    tx: &mpsc::Sender<Message>,
+) -> Option<ResolvedBands> {
+    let requested = SamBands::from_config(config);
+    let resolved = if requested.is_default_rgb() {
+        requested
     } else {
-        let streams_guard = streams.read().await;
-        match streams_guard.active_image() {
-            Some(id) => id.to_string(),
-            None => {
-                let error = ProtocolError::error(
-                    ErrorCode::NoActiveImage,
-                    "No active image set. Provide image_id or call set_image first.",
-                );
-                tx.send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await
-                .ok();
-                return;
-            }
-        }
-    };
-
-    let requested_bands = SamBands::from_config(config.as_ref());
-    let resolved_bands = if requested_bands.is_default_rgb() {
-        requested_bands
-    } else {
-        match resolve_sam_bands(&state, &image_id, requested_bands).await {
-            Ok(resolved) => resolved,
+        match resolve_sam_bands(state, image_id, requested).await {
+            Ok(r) => r,
             Err(e) => {
                 tracing::error!("Failed to resolve band selection for '{}': {}", image_id, e);
-                let error = ProtocolError::error(
-                    ErrorCode::ImageNotFound,
-                    format!("Failed to resolve image bands: {}", e),
-                );
-                tx.send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await
-                .ok();
-                return;
+                send_error(tx, request_id, ErrorCode::ImageNotFound, format!("Failed to resolve image bands: {}", e)).await;
+                return None;
             }
         }
     };
-    if resolved_bands != requested_bands {
+    if resolved != requested {
         tracing::debug!(
-            "Resolved requested SAM bands [{}, {}, {}] to [{}, {}, {}] for '{}'",
-            requested_bands.red,
-            requested_bands.green,
-            requested_bands.blue,
-            resolved_bands.red,
-            resolved_bands.green,
-            resolved_bands.blue,
+            "Resolved SAM bands [{}, {}, {}] to [{}, {}, {}] for '{}'",
+            requested.red, requested.green, requested.blue,
+            resolved.red, resolved.green, resolved.blue,
             image_id
         );
     }
-    let embedding_key = resolved_bands.embedding_key(&image_id);
+    Some(ResolvedBands {
+        requested,
+        resolved,
+        embedding_key: resolved.embedding_key(image_id),
+    })
+}
 
-    // Load RGB image data with selected bands
-    // Note: We don't cache band-specific extractions because they can vary per request
-    let (rgb_data, width, height) = {
-        let streams_guard = streams.read().await;
+/// Loaded image data ready for inference.
+struct LoadedImage {
+    cache_key: String,
+    rgb_data: Vec<u8>,
+    width: u32,
+    height: u32,
+}
 
-        // Only use cache for default bands [0, 1, 2]
-        let use_cache = resolved_bands.is_default_rgb();
+/// Load RGB image data with caching. If `dimensions_only` is true, only
+/// width/height are needed (rgb_data will be empty) — used when the backend
+/// already has a prepared embedding.
+async fn load_image_for_inference(
+    state: &AppState,
+    streams: &Arc<RwLock<ConnectionStreams>>,
+    image_id: &str,
+    bands: &ResolvedBands,
+    dimensions_only: bool,
+    request_id: u32,
+    tx: &mpsc::Sender<Message>,
+) -> Option<LoadedImage> {
+    if dimensions_only {
+        // Fast path: try prepared-dimensions cache first.
+        if let Some((w, h)) = streams.write().await.prepared_dimensions(&bands.embedding_key) {
+            return Some(LoadedImage { cache_key: bands.embedding_key.clone(), rgb_data: Vec::new(), width: w, height: h });
+        }
+    }
 
-        if use_cache {
-            if let Some(cached) = streams_guard.get_cached_image(&image_id) {
-                let data = (cached.rgb_data.clone(), cached.width, cached.height);
-                drop(streams_guard);
-                data
-            } else {
-                drop(streams_guard);
-                // Load image with default bands
-                match load_image_rgb(&state, &image_id).await {
-                    Ok((rgb, w, h)) => {
-                        // Cache it
-                        streams
-                            .write()
-                            .await
-                            .cache_image(image_id.clone(), rgb.clone(), w, h);
-                        (rgb, w, h)
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to load image '{}': {}", image_id, e);
-                        let error = ProtocolError::error(
-                            ErrorCode::ImageNotFound,
-                            format!("Failed to load image: {}", e),
-                        );
-                        tx.send(Message::Binary(
-                            encode_stream_error(request_id, &error).into(),
-                        ))
-                        .await
-                        .ok();
-                        return;
-                    }
-                }
+    if bands.resolved.is_default_rgb() {
+        // Default RGB [0,1,2]: use per-connection image cache.
+        let cached = {
+            let guard = streams.read().await;
+            guard.get_cached_image(image_id).map(|c| (c.rgb_data.clone(), c.width, c.height))
+        };
+        if let Some((rgb, w, h)) = cached {
+            let rgb_data = if dimensions_only { Vec::new() } else { rgb };
+            return Some(LoadedImage { cache_key: bands.embedding_key.clone(), rgb_data, width: w, height: h });
+        }
+        match load_image_rgb(state, image_id).await {
+            Ok((rgb, w, h)) => {
+                streams.write().await.cache_image(image_id.to_string(), rgb.clone(), w, h);
+                let rgb_data = if dimensions_only { Vec::new() } else { rgb };
+                Some(LoadedImage { cache_key: bands.embedding_key.clone(), rgb_data, width: w, height: h })
             }
-        } else {
-            drop(streams_guard);
-            // Load image with custom band selection (no caching)
-            match load_image_rgb_with_bands(
-                &state,
-                &image_id,
-                resolved_bands.red,
-                resolved_bands.green,
-                resolved_bands.blue,
-            )
-            .await
-            {
-                Ok((rgb, w, h, _resolved)) => (rgb, w, h),
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to load image '{}' with requested bands [{}, {}, {}] (resolved [{}, {}, {}]): {}",
-                        image_id,
-                        requested_bands.red,
-                        requested_bands.green,
-                        requested_bands.blue,
-                        resolved_bands.red,
-                        resolved_bands.green,
-                        resolved_bands.blue,
-                        e
-                    );
-                    let error = ProtocolError::error(
-                        ErrorCode::ImageNotFound,
-                        format!("Failed to load image with bands: {}", e),
-                    );
-                    tx.send(Message::Binary(
-                        encode_stream_error(request_id, &error).into(),
-                    ))
-                    .await
-                    .ok();
-                    return;
-                }
+            Err(e) => {
+                tracing::error!("Failed to load image '{}': {}", image_id, e);
+                send_error(tx, request_id, ErrorCode::ImageNotFound, format!("Failed to load image: {}", e)).await;
+                None
             }
         }
-    };
+    } else {
+        // Custom band selection — no caching (varies per request).
+        match load_image_rgb_with_bands(state, image_id, bands.resolved.red, bands.resolved.green, bands.resolved.blue).await {
+            Ok((rgb, w, h, _)) => {
+                let rgb_data = if dimensions_only { Vec::new() } else { rgb };
+                Some(LoadedImage { cache_key: bands.embedding_key.clone(), rgb_data, width: w, height: h })
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to load image '{}' with bands [{}, {}, {}] (resolved [{}, {}, {}]): {}",
+                    image_id,
+                    bands.requested.red, bands.requested.green, bands.requested.blue,
+                    bands.resolved.red, bands.resolved.green, bands.resolved.blue,
+                    e
+                );
+                send_error(tx, request_id, ErrorCode::ImageNotFound, format!("Failed to load image with bands: {}", e)).await;
+                None
+            }
+        }
+    }
+}
 
-    // Prepare embedding
-    let image_context = crate::inference::ImageContext {
-        image_id: embedding_key.clone(),
-        rgb_data,
-        width,
-        height,
-    };
+/// For embedding-backed models, resolve clamped band key lazily and verify
+/// the embedding is ready. Returns `false` if an error was sent to the client.
+async fn ensure_embedding_ready(
+    ctx: &MuxRequestCtx,
+    backend: &dyn InferenceBackend,
+    image_id: &str,
+    bands: &mut ResolvedBands,
+    request_id: u32,
+) -> bool {
+    if !backend.requires_embedding() {
+        return true;
+    }
 
+    // Resolve clamped key so e.g. [19,1,2] and [2,1,2] share the same
+    // embedding on a 3-band image.
+    if !bands.requested.is_default_rgb() && !backend.is_prepared(&bands.embedding_key).await {
+        match resolve_sam_bands(&ctx.state, image_id, bands.requested).await {
+            Ok(resolved) => {
+                bands.resolved = resolved;
+                bands.embedding_key = resolved.embedding_key(image_id);
+            }
+            Err(e) => {
+                tracing::error!("Failed to resolve band selection for '{}': {}", image_id, e);
+                send_error(&ctx.tx, request_id, ErrorCode::ImageNotFound, format!("Failed to resolve image bands: {}", e)).await;
+                return false;
+            }
+        }
+    }
+
+    if !backend.is_prepared(&bands.embedding_key).await {
+        let error = ProtocolError::error(
+            ErrorCode::EmbeddingRequired,
+            format!(
+                "Model embedding not ready for image '{}' and bands [{}, {}, {}] (resolved [{}, {}, {}]). Call prepare_model first.",
+                image_id,
+                bands.requested.red, bands.requested.green, bands.requested.blue,
+                bands.resolved.red, bands.resolved.green, bands.resolved.blue
+            ),
+        );
+        ctx.tx.send(Message::Binary(encode_stream_error(request_id, &error).into())).await.ok();
+        return false;
+    }
+
+    true
+}
+
+/// Build a non-blocking progress callback that forwards to the client channel.
+fn make_progress_callback(
+    tx: &mpsc::Sender<Message>,
+    request_id: u32,
+) -> Option<crate::inference::ProgressCallback> {
     let progress_tx = tx.clone();
-    let progress_cb = Some(Box::new(move |progress: u8, status: &str| {
+    Some(Box::new(move |progress: u8, status: &str| {
         let msg = encode_infer_progress(request_id, progress, status);
-        // try_send is non-blocking - if channel is full, progress update is dropped.
-        // This is acceptable because progress updates are non-critical telemetry.
+        // try_send is non-blocking — if channel is full, progress update is dropped.
         progress_tx.try_send(Message::Binary(msg.into())).ok();
-    }) as crate::inference::ProgressCallback);
+    }))
+}
 
-    match backend.prepare(&image_context, progress_cb).await {
+// ---------------------------------------------------------------------------
+// prepare_model / infer handlers
+// ---------------------------------------------------------------------------
+
+/// Handle prepare_model request.
+async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) {
+    let PrepareModelRequest { request_id, model_id, image_id, config } = request;
+
+    tracing::info!(
+        "Mux connection {}: prepare_model {} for {:?} (request_id={})",
+        ctx.connection_id, model_id, image_id, request_id
+    );
+
+    let backend = match resolve_model_backend(&ctx.state, &model_id, request_id, &ctx.tx).await {
+        Some(b) => b,
+        None => return,
+    };
+    let image_id = match resolve_image_id(&ctx.streams, image_id, request_id, &ctx.tx).await {
+        Some(id) => id,
+        None => return,
+    };
+    let bands = match resolve_band_selection(&ctx.state, &image_id, config.as_ref(), request_id, &ctx.tx).await {
+        Some(b) => b,
+        None => return,
+    };
+    let loaded = match load_image_for_inference(&ctx.state, &ctx.streams, &image_id, &bands, false, request_id, &ctx.tx).await {
+        Some(l) => l,
+        None => return,
+    };
+
+    let image_context = crate::inference::ImageContext {
+        image_id: bands.embedding_key.clone(),
+        rgb_data: loaded.rgb_data,
+        width: loaded.width,
+        height: loaded.height,
+    };
+
+    match backend.prepare(&image_context, make_progress_callback(&ctx.tx, request_id)).await {
         Ok(()) => {
-            streams
-                .write()
-                .await
-                .cache_prepared_dimensions(embedding_key, width, height);
+            ctx.streams.write().await.cache_prepared_dimensions(bands.embedding_key, loaded.width, loaded.height);
             let msg = encode_model_ready(request_id, &model_id);
-            tx.send(Message::Binary(msg.into())).await.ok();
+            ctx.tx.send(Message::Binary(msg.into())).await.ok();
             tracing::info!(
                 "Mux connection {}: model {} ready for '{}'",
-                connection_id,
-                model_id,
-                image_id
+                ctx.connection_id, model_id, image_id
             );
         }
         Err(e) => {
             tracing::error!("Model prepare failed: {}", e);
-            let error = ProtocolError::error(
-                ErrorCode::ModelEncodeFailed,
-                format!("Failed to prepare model: {}", e),
-            );
-            tx.send(Message::Binary(
-                encode_stream_error(request_id, &error).into(),
-            ))
-            .await
-            .ok();
+            send_error(&ctx.tx, request_id, ErrorCode::ModelEncodeFailed, format!("Failed to prepare model: {}", e)).await;
         }
     }
 }
 
 /// Handle infer request.
 async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
-    let MuxRequestCtx {
-        state,
-        streams,
-        tx,
-        connection_id,
-    } = ctx;
-    let InferModelRequest {
-        request_id,
-        model_id,
-        image_id,
-        inputs,
-        options,
-    } = request;
+    let InferModelRequest { request_id, model_id, image_id, inputs, options } = request;
 
     tracing::debug!(
         "Mux connection {}: infer {} (request_id={})",
-        connection_id,
-        model_id,
-        request_id
+        ctx.connection_id, model_id, request_id
     );
 
-    // Get model registry
-    let registry = match state.model_registry.as_ref() {
-        Some(r) => r.clone(),
-        None => {
-            let error = ProtocolError::error(
-                ErrorCode::ModelNotFound,
-                "No models available on this server",
-            );
-            tx.send(Message::Binary(
-                encode_stream_error(request_id, &error).into(),
-            ))
-            .await
-            .ok();
-            return;
-        }
-    };
-
-    // Get the backend
-    let backend = match registry.get(&model_id) {
+    let backend = match resolve_model_backend(&ctx.state, &model_id, request_id, &ctx.tx).await {
         Some(b) => b,
-        None => {
-            let error = ProtocolError::error(
-                ErrorCode::ModelNotFound,
-                format!("Model '{}' not found", model_id),
-            );
-            tx.send(Message::Binary(
-                encode_stream_error(request_id, &error).into(),
-            ))
-            .await
-            .ok();
-            return;
-        }
+        None => return,
     };
 
-    // Validate inputs
     if let Err(e) = backend.validate_inputs(&inputs) {
-        let error = ProtocolError::error(ErrorCode::InvalidInput, format!("Invalid inputs: {}", e));
-        tx.send(Message::Binary(
-            encode_stream_error(request_id, &error).into(),
-        ))
-        .await
-        .ok();
+        send_error(&ctx.tx, request_id, ErrorCode::InvalidInput, format!("Invalid inputs: {}", e)).await;
         return;
     }
 
-    let image_id = if let Some(explicit_image_id) = image_id {
-        explicit_image_id
-    } else {
-        let streams_guard = streams.read().await;
-        match streams_guard.active_image() {
-            Some(id) => id.to_string(),
-            None => {
-                let error = ProtocolError::error(
-                    ErrorCode::NoActiveImage,
-                    "No active image set. Provide image_id or call set_image first.",
-                );
-                tx.send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await
-                .ok();
-                return;
-            }
-        }
+    let image_id = match resolve_image_id(&ctx.streams, image_id, request_id, &ctx.tx).await {
+        Some(id) => id,
+        None => return,
     };
-    let requested_bands = SamBands::from_config(Some(&options));
-    let mut resolved_bands = requested_bands;
-    let mut embedding_key = requested_bands.embedding_key(&image_id);
 
-    // Resolve clamped key if needed so [19,1,2] and [2,1,2] share the same embedding on 3-band images.
-    if backend.requires_embedding()
-        && !requested_bands.is_default_rgb()
-        && !backend.is_prepared(&embedding_key).await
-    {
-        match resolve_sam_bands(&state, &image_id, requested_bands).await {
-            Ok(resolved) => {
-                resolved_bands = resolved;
-                embedding_key = resolved_bands.embedding_key(&image_id);
-            }
-            Err(e) => {
-                tracing::error!("Failed to resolve band selection for '{}': {}", image_id, e);
-                let error = ProtocolError::error(
-                    ErrorCode::ImageNotFound,
-                    format!("Failed to resolve image bands: {}", e),
-                );
-                tx.send(Message::Binary(
-                    encode_stream_error(request_id, &error).into(),
-                ))
-                .await
-                .ok();
-                return;
-            }
-        }
-    }
-    if resolved_bands != requested_bands {
-        tracing::debug!(
-            "Resolved infer bands [{}, {}, {}] to [{}, {}, {}] for '{}'",
-            requested_bands.red,
-            requested_bands.green,
-            requested_bands.blue,
-            resolved_bands.red,
-            resolved_bands.green,
-            resolved_bands.blue,
-            image_id
-        );
-    }
+    // Resolve bands — for infer, band config comes from `options`.
+    let mut bands = match resolve_band_selection(&ctx.state, &image_id, Some(&options), request_id, &ctx.tx).await {
+        Some(b) => b,
+        None => return,
+    };
 
-    // Check if model requires embedding and if it's ready.
-    if backend.requires_embedding() && !backend.is_prepared(&embedding_key).await {
-        let error = ProtocolError::error(
-            ErrorCode::EmbeddingRequired,
-            format!(
-                "Model embedding not ready for image '{}' and bands [{}, {}, {}] (resolved [{}, {}, {}]). Call prepare_model first.",
-                image_id,
-                requested_bands.red,
-                requested_bands.green,
-                requested_bands.blue,
-                resolved_bands.red,
-                resolved_bands.green,
-                resolved_bands.blue
-            ),
-        );
-        tx.send(Message::Binary(
-            encode_stream_error(request_id, &error).into(),
-        ))
-        .await
-        .ok();
+    if !ensure_embedding_ready(&ctx, backend.as_ref(), &image_id, &mut bands, request_id).await {
         return;
     }
 
-    let (cache_key, rgb_data, width, height) = if backend.requires_embedding() {
-        // Fast path: for embedding-backed models, infer only needs dimensions.
-        if let Some((w, h)) = streams.write().await.prepared_dimensions(&embedding_key) {
-            (embedding_key.clone(), Vec::new(), w, h)
-        } else if resolved_bands.is_default_rgb() {
-            let streams_guard = streams.read().await;
-            if let Some(cached) = streams_guard.get_cached_image(&image_id) {
-                (
-                    embedding_key.clone(),
-                    Vec::new(),
-                    cached.width,
-                    cached.height,
-                )
-            } else {
-                drop(streams_guard);
-                match load_image_rgb(&state, &image_id).await {
-                    Ok((rgb, w, h)) => {
-                        streams
-                            .write()
-                            .await
-                            .cache_image(image_id.clone(), rgb, w, h);
-                        (embedding_key.clone(), Vec::new(), w, h)
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to load image '{}': {}", image_id, e);
-                        let error = ProtocolError::error(
-                            ErrorCode::ImageNotFound,
-                            format!("Failed to load image: {}", e),
-                        );
-                        tx.send(Message::Binary(
-                            encode_stream_error(request_id, &error).into(),
-                        ))
-                        .await
-                        .ok();
-                        return;
-                    }
-                }
-            }
-        } else {
-            match load_image_rgb_with_bands(
-                &state,
-                &image_id,
-                resolved_bands.red,
-                resolved_bands.green,
-                resolved_bands.blue,
-            )
-            .await
-            {
-                Ok((_rgb, w, h, _resolved)) => (embedding_key.clone(), Vec::new(), w, h),
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to load image '{}' with requested bands [{}, {}, {}] (resolved [{}, {}, {}]): {}",
-                        image_id,
-                        requested_bands.red,
-                        requested_bands.green,
-                        requested_bands.blue,
-                        resolved_bands.red,
-                        resolved_bands.green,
-                        resolved_bands.blue,
-                        e
-                    );
-                    let error = ProtocolError::error(
-                        ErrorCode::ImageNotFound,
-                        format!("Failed to load image with bands: {}", e),
-                    );
-                    tx.send(Message::Binary(
-                        encode_stream_error(request_id, &error).into(),
-                    ))
-                    .await
-                    .ok();
-                    return;
-                }
-            }
-        }
-    } else {
-        // Generic non-embedding backend path.
-        let streams_guard = streams.read().await;
-        if let Some(cached) = streams_guard.get_cached_image(&image_id) {
-            (
-                image_id.clone(),
-                cached.rgb_data.clone(),
-                cached.width,
-                cached.height,
-            )
-        } else {
-            drop(streams_guard);
-            match load_image_rgb(&state, &image_id).await {
-                Ok((rgb, w, h)) => {
-                    streams
-                        .write()
-                        .await
-                        .cache_image(image_id.clone(), rgb.clone(), w, h);
-                    (image_id.clone(), rgb, w, h)
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load image '{}': {}", image_id, e);
-                    let error = ProtocolError::error(
-                        ErrorCode::ImageNotFound,
-                        format!("Failed to load image: {}", e),
-                    );
-                    tx.send(Message::Binary(
-                        encode_stream_error(request_id, &error).into(),
-                    ))
-                    .await
-                    .ok();
-                    return;
-                }
-            }
-        }
+    let dimensions_only = backend.requires_embedding();
+    let loaded = match load_image_for_inference(&ctx.state, &ctx.streams, &image_id, &bands, dimensions_only, request_id, &ctx.tx).await {
+        Some(l) => l,
+        None => return,
     };
 
-    // Run inference
+    // For non-embedding backends, cache_key is the plain image_id.
+    let cache_key = if backend.requires_embedding() { loaded.cache_key } else { image_id.clone() };
+
     let image_context = crate::inference::ImageContext {
         image_id: cache_key,
-        rgb_data,
-        width,
-        height,
+        rgb_data: loaded.rgb_data,
+        width: loaded.width,
+        height: loaded.height,
     };
 
-    let progress_tx = tx.clone();
-    let progress_cb = Some(Box::new(move |progress: u8, status: &str| {
-        let msg = encode_infer_progress(request_id, progress, status);
-        // try_send is non-blocking - if channel is full, progress update is dropped.
-        // This is acceptable because progress updates are non-critical telemetry.
-        progress_tx.try_send(Message::Binary(msg.into())).ok();
-    }) as crate::inference::ProgressCallback);
-
-    match backend
-        .infer(&image_context, inputs, options, progress_cb)
-        .await
-    {
+    match backend.infer(&image_context, inputs, options, make_progress_callback(&ctx.tx, request_id)).await {
         Ok(result) => {
-            // Serialize result to JSON
             let result_json = serde_json::json!({
                 "model_id": result.model_id,
                 "outputs": result.outputs,
                 "timing_ms": result.timing_ms,
             });
-
             let json_str = serde_json::to_string(&result_json).unwrap();
             let msg = encode_infer_result(request_id, &json_str);
-            tx.send(Message::Binary(msg.into())).await.ok();
-
+            ctx.tx.send(Message::Binary(msg.into())).await.ok();
             tracing::debug!(
                 "Mux connection {}: inference complete ({}ms)",
-                connection_id,
-                result.timing_ms
+                ctx.connection_id, result.timing_ms
             );
         }
         Err(e) => {
             tracing::error!("Inference failed: {}", e);
-            let error = ProtocolError::error(
-                ErrorCode::ModelDecodeFailed,
-                format!("Inference failed: {}", e),
-            );
-            tx.send(Message::Binary(
-                encode_stream_error(request_id, &error).into(),
-            ))
-            .await
-            .ok();
+            send_error(&ctx.tx, request_id, ErrorCode::ModelDecodeFailed, format!("Inference failed: {}", e)).await;
         }
     }
 }

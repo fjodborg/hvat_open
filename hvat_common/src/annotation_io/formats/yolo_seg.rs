@@ -167,6 +167,7 @@ impl AnnotationImporter for YoloSegFormat {
         FormatId::YoloSeg
     }
 
+    #[allow(clippy::too_many_lines)]
     fn import(
         &self,
         bundle: &ImportBundle,
