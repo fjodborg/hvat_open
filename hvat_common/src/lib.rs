@@ -3,6 +3,7 @@
 //! This crate provides common functionality used across hvat_axum, hvat_leptos,
 //! and hvat_gpu to avoid code duplication and ensure consistent behavior.
 
+pub mod annotation_io;
 pub mod binary;
 pub mod error;
 pub mod interpolation;
@@ -10,6 +11,7 @@ pub mod packing;
 pub mod protocol;
 pub mod pyramid;
 
+pub use annotation_io::*;
 pub use binary::BinaryReader;
 pub use error::{ErrorContext, ProtocolError};
 pub use interpolation::bilinear_sample;

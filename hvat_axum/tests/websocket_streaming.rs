@@ -12,6 +12,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use hvat_axum::sam::{ExecutionProvider, SamVariant};
 use hvat_axum::{AppState, ServerConfig, routes};
+use hvat_common::annotation_io::{BundleFile, ExportBundle};
+use zip::ZipArchive;
 
 /// Test context that holds temporary directories and server address.
 struct TestContext {
@@ -45,8 +47,22 @@ fn create_test_png() -> Vec<u8> {
     bytes
 }
 
+async fn bind_test_listener() -> Option<(TcpListener, SocketAddr)> {
+    match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => match listener.local_addr() {
+            Ok(addr) => Some((listener, addr)),
+            Err(e) => panic!("Failed to get listener address: {e}"),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("Skipping test: unable to bind local TCP listener in this environment ({e})");
+            None
+        }
+        Err(e) => panic!("Failed to bind local TCP listener: {e}"),
+    }
+}
+
 /// Create test fixtures and start server, returning context.
-async fn setup_test_server() -> TestContext {
+async fn setup_test_server() -> Option<TestContext> {
     // Create temporary directories
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let cache_dir = TempDir::new().expect("Failed to create cache dir");
@@ -94,11 +110,12 @@ async fn setup_test_server() -> TestContext {
         .layer(cors)
         .with_state(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let (listener, addr) = bind_test_listener().await?;
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        if let Err(err) = axum::serve(listener, app).await {
+            eprintln!("Test server exited with error: {err}");
+        }
     });
 
     // Give server time to start
@@ -111,12 +128,14 @@ async fn setup_test_server() -> TestContext {
         test_image_id: "test_image_png".to_string(),
     };
     ctx.assert_temp_dirs_alive();
-    ctx
+    Some(ctx)
 }
 
 #[tokio::test]
 async fn test_rest_api_info() {
-    let ctx = setup_test_server().await;
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
 
     let client = reqwest::Client::new();
     let resp = client
@@ -147,7 +166,9 @@ async fn test_rest_api_info() {
 
 #[tokio::test]
 async fn test_rest_api_images() {
-    let ctx = setup_test_server().await;
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
 
     let client = reqwest::Client::new();
     let resp = client
@@ -174,6 +195,228 @@ async fn test_rest_api_images() {
     }
 
     println!("Images: {}", serde_json::to_string_pretty(&images).unwrap());
+}
+
+#[tokio::test]
+async fn test_rest_api_images_download_archive() {
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/images/download", ctx.addr))
+        .send()
+        .await
+        .expect("Failed to fetch image archive");
+
+    assert!(
+        resp.status().is_success(),
+        "Archive endpoint should succeed"
+    );
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.contains("application/zip"),
+        "Expected application/zip response, got '{}'",
+        content_type
+    );
+
+    let bytes = resp.bytes().await.expect("Failed to read archive response");
+    let mut archive =
+        ZipArchive::new(Cursor::new(bytes.to_vec())).expect("Failed to parse zip archive");
+
+    let mut names = Vec::new();
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).expect("Failed to read zip entry");
+        names.push(entry.name().to_string());
+    }
+    names.sort();
+
+    assert_eq!(names.len(), 2, "Expected exactly 2 images in archive");
+    assert!(
+        names.iter().any(|name| name == "test_image.png"),
+        "Archive should contain top-level image: {:?}",
+        names
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "subfolder/nested_image.png"),
+        "Archive should contain nested image path: {:?}",
+        names
+    );
+}
+
+#[tokio::test]
+async fn test_rest_api_images_download_plan() {
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/images/download/plan", ctx.addr))
+        .send()
+        .await
+        .expect("Failed to fetch image download plan");
+
+    assert!(resp.status().is_success(), "Plan endpoint should succeed");
+    let plan: serde_json::Value = resp.json().await.expect("Failed to parse plan JSON");
+
+    let total_files = plan["total_files"].as_u64().unwrap_or(0);
+    let part_count = plan["part_count"].as_u64().unwrap_or(0);
+    let parts = plan["parts"].as_array().cloned().unwrap_or_default();
+
+    assert_eq!(total_files, 2, "Plan should include 2 files");
+    assert!(
+        part_count >= 1,
+        "Plan should include at least one part, got {}",
+        part_count
+    );
+    assert_eq!(
+        parts.len() as u64,
+        part_count,
+        "parts array length should match part_count"
+    );
+
+    let first_part = parts.first().expect("Plan should include first part");
+    assert!(
+        first_part["filename"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(".zip"),
+        "Part filename should end with .zip"
+    );
+}
+
+#[tokio::test]
+async fn test_rest_api_images_download_part() {
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/images/download/part/0", ctx.addr))
+        .send()
+        .await
+        .expect("Failed to fetch image archive part");
+
+    assert!(
+        resp.status().is_success(),
+        "Part endpoint should succeed for part 0"
+    );
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.contains("application/zip"),
+        "Expected application/zip response, got '{}'",
+        content_type
+    );
+
+    let bytes = resp.bytes().await.expect("Failed to read archive response");
+    let archive =
+        ZipArchive::new(Cursor::new(bytes.to_vec())).expect("Failed to parse zip archive");
+    assert!(
+        archive.len() >= 1,
+        "Part archive should contain at least one image"
+    );
+}
+
+#[tokio::test]
+async fn test_rest_api_images_download_part_invalid_index() {
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/images/download/part/999", ctx.addr))
+        .send()
+        .await
+        .expect("Failed to fetch invalid image archive part");
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "Invalid part index should return 404"
+    );
+}
+
+#[tokio::test]
+async fn test_project_state_round_trip() {
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/api/project-state", ctx.addr);
+
+    let missing = client
+        .get(&url)
+        .send()
+        .await
+        .expect("Failed to fetch project state");
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let bundle = ExportBundle {
+        files: vec![BundleFile {
+            path: "annotations/default.json".to_string(),
+            bytes: br#"{"items":[]}"#.to_vec(),
+            mime_type: Some("application/json".to_string()),
+        }],
+    };
+    let payload = serde_json::to_vec(&bundle).expect("serialize project state bundle");
+
+    let save = client
+        .put(&url)
+        .header("content-type", "application/json")
+        .body(payload.clone())
+        .send()
+        .await
+        .expect("Failed to save project state");
+    assert_eq!(save.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let loaded = client
+        .get(&url)
+        .send()
+        .await
+        .expect("Failed to reload project state");
+    assert_eq!(loaded.status(), reqwest::StatusCode::OK);
+    let loaded_bytes = loaded.bytes().await.expect("read response body");
+    assert_eq!(loaded_bytes.as_ref(), payload.as_slice());
+
+    let decoded: ExportBundle =
+        serde_json::from_slice(&loaded_bytes).expect("decode saved bundle payload");
+    assert_eq!(decoded.files.len(), 1);
+    assert_eq!(decoded.files[0].path, "annotations/default.json");
+}
+
+#[tokio::test]
+async fn test_project_state_rejects_invalid_payload() {
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/api/project-state", ctx.addr);
+
+    let resp = client
+        .put(&url)
+        .header("content-type", "application/json")
+        .body(r#"{"not":"a valid bundle"}"#)
+        .send()
+        .await
+        .expect("Failed to submit invalid payload");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -255,11 +498,12 @@ async fn start_test_server_with_sam() -> Option<SocketAddr> {
         .layer(cors)
         .with_state(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let (listener, addr) = bind_test_listener().await?;
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        if let Err(err) = axum::serve(listener, app).await {
+            eprintln!("SAM test server exited with error: {err}");
+        }
     });
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -466,11 +710,14 @@ async fn test_progressive_streaming_sends_multiple_levels() {
         .layer(cors)
         .with_state(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    let Some((listener, addr)) = bind_test_listener().await else {
+        return;
+    };
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        if let Err(err) = axum::serve(listener, app).await {
+            eprintln!("Progressive streaming test server exited with error: {err}");
+        }
     });
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -732,7 +979,9 @@ async fn test_progressive_streaming_sends_multiple_levels() {
 /// Test that the multiplexed endpoint sends capabilities on connect.
 #[tokio::test]
 async fn test_mux_websocket_sends_capabilities_on_connect() {
-    let ctx = setup_test_server().await;
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
 
     // Connect to multiplexed WebSocket endpoint
     let ws_url = format!("ws://{}/api/ws", ctx.addr);
@@ -782,7 +1031,9 @@ async fn test_mux_websocket_sends_capabilities_on_connect() {
 /// Test that the multiplexed endpoint can stream an image using Protocol v2 (set_image + stream_image).
 #[tokio::test]
 async fn test_mux_websocket_streams_image() {
-    let ctx = setup_test_server().await;
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
 
     // Connect to multiplexed WebSocket endpoint
     let ws_url = format!("ws://{}/api/ws", ctx.addr);
@@ -950,7 +1201,9 @@ async fn test_mux_websocket_streams_image() {
 /// Test that multiple concurrent streams work on the multiplexed endpoint.
 #[tokio::test]
 async fn test_mux_websocket_concurrent_streams() {
-    let ctx = setup_test_server().await;
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
 
     // Connect to multiplexed WebSocket endpoint
     let ws_url = format!("ws://{}/api/ws", ctx.addr);
@@ -1099,7 +1352,9 @@ async fn test_mux_websocket_concurrent_streams() {
 /// Test that cancel_stream works on the multiplexed endpoint.
 #[tokio::test]
 async fn test_mux_websocket_cancel_stream() {
-    let ctx = setup_test_server().await;
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
 
     // Connect to multiplexed WebSocket endpoint
     let ws_url = format!("ws://{}/api/ws", ctx.addr);
@@ -1189,7 +1444,9 @@ async fn test_mux_websocket_cancel_stream() {
 /// Test that legacy protocol messages are rejected on the multiplexed endpoint.
 #[tokio::test]
 async fn test_mux_websocket_rejects_legacy_protocol() {
-    let ctx = setup_test_server().await;
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
 
     // Connect to multiplexed WebSocket endpoint
     let ws_url = format!("ws://{}/api/ws", ctx.addr);

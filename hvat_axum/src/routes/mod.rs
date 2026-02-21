@@ -16,7 +16,12 @@ use crate::state::AppState;
 /// API endpoints:
 /// - `GET /api/info` - Server/project information
 /// - `GET /api/images` - List all images (for tree display)
+/// - `GET /api/project-state` - Load saved native project annotations
+/// - `PUT /api/project-state` - Save native project annotations
 /// - `GET /api/images/:id/meta` - Image metadata
+/// - `GET /api/images/download` - Download all project images as ZIP
+/// - `GET /api/images/download/plan` - Chunked image-download plan
+/// - `GET /api/images/download/part/:index` - Download one ZIP chunk
 /// - `WS /api/ws` - Multiplexed WebSocket streaming
 pub fn api_router() -> Router<Arc<AppState>> {
     Router::new()
