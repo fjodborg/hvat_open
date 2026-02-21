@@ -670,18 +670,14 @@ async fn handle_mux_message(
             progressive,
         } => handle_stream_image(&ctx, request_id, level, progressive).await,
 
-        ClientMessage::CancelStream { request_id } => {
-            handle_cancel_stream(&ctx, request_id).await
-        }
+        ClientMessage::CancelStream { request_id } => handle_cancel_stream(&ctx, request_id).await,
 
         ClientMessage::PrepareModel {
             request_id,
             model_id,
             image_id,
             config,
-        } => {
-            spawn_prepare_model_task(&ctx, request_id, model_id, image_id, config).await
-        }
+        } => spawn_prepare_model_task(&ctx, request_id, model_id, image_id, config).await,
 
         ClientMessage::Infer {
             request_id,
@@ -691,9 +687,7 @@ async fn handle_mux_message(
             options,
         } => spawn_infer_task(&ctx, request_id, model_id, image_id, inputs, options).await,
 
-        ClientMessage::CancelInfer { request_id } => {
-            handle_cancel_infer(&ctx, request_id).await
-        }
+        ClientMessage::CancelInfer { request_id } => handle_cancel_infer(&ctx, request_id).await,
 
         ClientMessage::Pong { .. } => {} // Handled in the main receive loop
     }
@@ -711,18 +705,19 @@ async fn handle_set_image(ctx: &MuxRequestCtx, request_id: u32, image_id: String
     ctx.tx.send(Message::Binary(msg.into())).await.ok();
 }
 
-async fn handle_stream_image(
-    ctx: &MuxRequestCtx,
-    request_id: u32,
-    level: u32,
-    progressive: bool,
-) {
+async fn handle_stream_image(ctx: &MuxRequestCtx, request_id: u32, level: u32, progressive: bool) {
     let image_id = {
         let streams_guard = ctx.streams.read().await;
         match streams_guard.active_image() {
             Some(id) => id.to_string(),
             None => {
-                send_error(&ctx.tx, request_id, ErrorCode::NoActiveImage, "No active image set. Call set_image first.").await;
+                send_error(
+                    &ctx.tx,
+                    request_id,
+                    ErrorCode::NoActiveImage,
+                    "No active image set. Call set_image first.",
+                )
+                .await;
                 return;
             }
         }
@@ -740,7 +735,9 @@ async fn handle_stream_image(
                 1000,
             );
             ctx.tx
-                .send(Message::Binary(encode_stream_error(request_id, &error).into()))
+                .send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
                 .await
                 .ok();
             return;
@@ -853,7 +850,9 @@ async fn spawn_infer_task(
                 100,
             );
             ctx.tx
-                .send(Message::Binary(encode_stream_error(request_id, &error).into()))
+                .send(Message::Binary(
+                    encode_stream_error(request_id, &error).into(),
+                ))
                 .await
                 .ok();
             return;
@@ -922,9 +921,11 @@ async fn send_error(
     message: impl Into<String>,
 ) {
     let error = ProtocolError::error(code, message);
-    tx.send(Message::Binary(encode_stream_error(request_id, &error).into()))
-        .await
-        .ok();
+    tx.send(Message::Binary(
+        encode_stream_error(request_id, &error).into(),
+    ))
+    .await
+    .ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -943,14 +944,26 @@ async fn resolve_model_backend(
     let registry = match state.model_registry.as_ref() {
         Some(r) => r.clone(),
         None => {
-            send_error(tx, request_id, ErrorCode::ModelNotFound, "No models available on this server").await;
+            send_error(
+                tx,
+                request_id,
+                ErrorCode::ModelNotFound,
+                "No models available on this server",
+            )
+            .await;
             return None;
         }
     };
     match registry.get(model_id) {
         Some(b) => Some(b),
         None => {
-            send_error(tx, request_id, ErrorCode::ModelNotFound, format!("Model '{}' not found", model_id)).await;
+            send_error(
+                tx,
+                request_id,
+                ErrorCode::ModelNotFound,
+                format!("Model '{}' not found", model_id),
+            )
+            .await;
             None
         }
     }
@@ -970,7 +983,13 @@ async fn resolve_image_id(
     match guard.active_image() {
         Some(id) => Some(id.to_string()),
         None => {
-            send_error(tx, request_id, ErrorCode::NoActiveImage, "No active image set. Provide image_id or call set_image first.").await;
+            send_error(
+                tx,
+                request_id,
+                ErrorCode::NoActiveImage,
+                "No active image set. Provide image_id or call set_image first.",
+            )
+            .await;
             None
         }
     }
@@ -999,7 +1018,13 @@ async fn resolve_band_selection(
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Failed to resolve band selection for '{}': {}", image_id, e);
-                send_error(tx, request_id, ErrorCode::ImageNotFound, format!("Failed to resolve image bands: {}", e)).await;
+                send_error(
+                    tx,
+                    request_id,
+                    ErrorCode::ImageNotFound,
+                    format!("Failed to resolve image bands: {}", e),
+                )
+                .await;
                 return None;
             }
         }
@@ -1007,8 +1032,12 @@ async fn resolve_band_selection(
     if resolved != requested {
         tracing::debug!(
             "Resolved SAM bands [{}, {}, {}] to [{}, {}, {}] for '{}'",
-            requested.red, requested.green, requested.blue,
-            resolved.red, resolved.green, resolved.blue,
+            requested.red,
+            requested.green,
+            requested.blue,
+            resolved.red,
+            resolved.green,
+            resolved.blue,
             image_id
         );
     }
@@ -1041,8 +1070,17 @@ async fn load_image_for_inference(
 ) -> Option<LoadedImage> {
     if dimensions_only {
         // Fast path: try prepared-dimensions cache first.
-        if let Some((w, h)) = streams.write().await.prepared_dimensions(&bands.embedding_key) {
-            return Some(LoadedImage { cache_key: bands.embedding_key.clone(), rgb_data: Vec::new(), width: w, height: h });
+        if let Some((w, h)) = streams
+            .write()
+            .await
+            .prepared_dimensions(&bands.embedding_key)
+        {
+            return Some(LoadedImage {
+                cache_key: bands.embedding_key.clone(),
+                rgb_data: Vec::new(),
+                width: w,
+                height: h,
+            });
         }
     }
 
@@ -1050,40 +1088,84 @@ async fn load_image_for_inference(
         // Default RGB [0,1,2]: use per-connection image cache.
         let cached = {
             let guard = streams.read().await;
-            guard.get_cached_image(image_id).map(|c| (c.rgb_data.clone(), c.width, c.height))
+            guard
+                .get_cached_image(image_id)
+                .map(|c| (c.rgb_data.clone(), c.width, c.height))
         };
         if let Some((rgb, w, h)) = cached {
             let rgb_data = if dimensions_only { Vec::new() } else { rgb };
-            return Some(LoadedImage { cache_key: bands.embedding_key.clone(), rgb_data, width: w, height: h });
+            return Some(LoadedImage {
+                cache_key: bands.embedding_key.clone(),
+                rgb_data,
+                width: w,
+                height: h,
+            });
         }
         match load_image_rgb(state, image_id).await {
             Ok((rgb, w, h)) => {
-                streams.write().await.cache_image(image_id.to_string(), rgb.clone(), w, h);
+                streams
+                    .write()
+                    .await
+                    .cache_image(image_id.to_string(), rgb.clone(), w, h);
                 let rgb_data = if dimensions_only { Vec::new() } else { rgb };
-                Some(LoadedImage { cache_key: bands.embedding_key.clone(), rgb_data, width: w, height: h })
+                Some(LoadedImage {
+                    cache_key: bands.embedding_key.clone(),
+                    rgb_data,
+                    width: w,
+                    height: h,
+                })
             }
             Err(e) => {
                 tracing::error!("Failed to load image '{}': {}", image_id, e);
-                send_error(tx, request_id, ErrorCode::ImageNotFound, format!("Failed to load image: {}", e)).await;
+                send_error(
+                    tx,
+                    request_id,
+                    ErrorCode::ImageNotFound,
+                    format!("Failed to load image: {}", e),
+                )
+                .await;
                 None
             }
         }
     } else {
         // Custom band selection — no caching (varies per request).
-        match load_image_rgb_with_bands(state, image_id, bands.resolved.red, bands.resolved.green, bands.resolved.blue).await {
+        match load_image_rgb_with_bands(
+            state,
+            image_id,
+            bands.resolved.red,
+            bands.resolved.green,
+            bands.resolved.blue,
+        )
+        .await
+        {
             Ok((rgb, w, h, _)) => {
                 let rgb_data = if dimensions_only { Vec::new() } else { rgb };
-                Some(LoadedImage { cache_key: bands.embedding_key.clone(), rgb_data, width: w, height: h })
+                Some(LoadedImage {
+                    cache_key: bands.embedding_key.clone(),
+                    rgb_data,
+                    width: w,
+                    height: h,
+                })
             }
             Err(e) => {
                 tracing::error!(
                     "Failed to load image '{}' with bands [{}, {}, {}] (resolved [{}, {}, {}]): {}",
                     image_id,
-                    bands.requested.red, bands.requested.green, bands.requested.blue,
-                    bands.resolved.red, bands.resolved.green, bands.resolved.blue,
+                    bands.requested.red,
+                    bands.requested.green,
+                    bands.requested.blue,
+                    bands.resolved.red,
+                    bands.resolved.green,
+                    bands.resolved.blue,
                     e
                 );
-                send_error(tx, request_id, ErrorCode::ImageNotFound, format!("Failed to load image with bands: {}", e)).await;
+                send_error(
+                    tx,
+                    request_id,
+                    ErrorCode::ImageNotFound,
+                    format!("Failed to load image with bands: {}", e),
+                )
+                .await;
                 None
             }
         }
@@ -1113,7 +1195,13 @@ async fn ensure_embedding_ready(
             }
             Err(e) => {
                 tracing::error!("Failed to resolve band selection for '{}': {}", image_id, e);
-                send_error(&ctx.tx, request_id, ErrorCode::ImageNotFound, format!("Failed to resolve image bands: {}", e)).await;
+                send_error(
+                    &ctx.tx,
+                    request_id,
+                    ErrorCode::ImageNotFound,
+                    format!("Failed to resolve image bands: {}", e),
+                )
+                .await;
                 return false;
             }
         }
@@ -1125,11 +1213,20 @@ async fn ensure_embedding_ready(
             format!(
                 "Model embedding not ready for image '{}' and bands [{}, {}, {}] (resolved [{}, {}, {}]). Call prepare_model first.",
                 image_id,
-                bands.requested.red, bands.requested.green, bands.requested.blue,
-                bands.resolved.red, bands.resolved.green, bands.resolved.blue
+                bands.requested.red,
+                bands.requested.green,
+                bands.requested.blue,
+                bands.resolved.red,
+                bands.resolved.green,
+                bands.resolved.blue
             ),
         );
-        ctx.tx.send(Message::Binary(encode_stream_error(request_id, &error).into())).await.ok();
+        ctx.tx
+            .send(Message::Binary(
+                encode_stream_error(request_id, &error).into(),
+            ))
+            .await
+            .ok();
         return false;
     }
 
@@ -1155,11 +1252,19 @@ fn make_progress_callback(
 
 /// Handle prepare_model request.
 async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) {
-    let PrepareModelRequest { request_id, model_id, image_id, config } = request;
+    let PrepareModelRequest {
+        request_id,
+        model_id,
+        image_id,
+        config,
+    } = request;
 
     tracing::info!(
         "Mux connection {}: prepare_model {} for {:?} (request_id={})",
-        ctx.connection_id, model_id, image_id, request_id
+        ctx.connection_id,
+        model_id,
+        image_id,
+        request_id
     );
 
     let backend = match resolve_model_backend(&ctx.state, &model_id, request_id, &ctx.tx).await {
@@ -1170,11 +1275,24 @@ async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) 
         Some(id) => id,
         None => return,
     };
-    let bands = match resolve_band_selection(&ctx.state, &image_id, config.as_ref(), request_id, &ctx.tx).await {
-        Some(b) => b,
-        None => return,
-    };
-    let loaded = match load_image_for_inference(&ctx.state, &ctx.streams, &image_id, &bands, false, request_id, &ctx.tx).await {
+    let bands =
+        match resolve_band_selection(&ctx.state, &image_id, config.as_ref(), request_id, &ctx.tx)
+            .await
+        {
+            Some(b) => b,
+            None => return,
+        };
+    let loaded = match load_image_for_inference(
+        &ctx.state,
+        &ctx.streams,
+        &image_id,
+        &bands,
+        false,
+        request_id,
+        &ctx.tx,
+    )
+    .await
+    {
         Some(l) => l,
         None => return,
     };
@@ -1186,30 +1304,53 @@ async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) 
         height: loaded.height,
     };
 
-    match backend.prepare(&image_context, make_progress_callback(&ctx.tx, request_id)).await {
+    match backend
+        .prepare(&image_context, make_progress_callback(&ctx.tx, request_id))
+        .await
+    {
         Ok(()) => {
-            ctx.streams.write().await.cache_prepared_dimensions(bands.embedding_key, loaded.width, loaded.height);
+            ctx.streams.write().await.cache_prepared_dimensions(
+                bands.embedding_key,
+                loaded.width,
+                loaded.height,
+            );
             let msg = encode_model_ready(request_id, &model_id);
             ctx.tx.send(Message::Binary(msg.into())).await.ok();
             tracing::info!(
                 "Mux connection {}: model {} ready for '{}'",
-                ctx.connection_id, model_id, image_id
+                ctx.connection_id,
+                model_id,
+                image_id
             );
         }
         Err(e) => {
             tracing::error!("Model prepare failed: {}", e);
-            send_error(&ctx.tx, request_id, ErrorCode::ModelEncodeFailed, format!("Failed to prepare model: {}", e)).await;
+            send_error(
+                &ctx.tx,
+                request_id,
+                ErrorCode::ModelEncodeFailed,
+                format!("Failed to prepare model: {}", e),
+            )
+            .await;
         }
     }
 }
 
 /// Handle infer request.
 async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
-    let InferModelRequest { request_id, model_id, image_id, inputs, options } = request;
+    let InferModelRequest {
+        request_id,
+        model_id,
+        image_id,
+        inputs,
+        options,
+    } = request;
 
     tracing::debug!(
         "Mux connection {}: infer {} (request_id={})",
-        ctx.connection_id, model_id, request_id
+        ctx.connection_id,
+        model_id,
+        request_id
     );
 
     let backend = match resolve_model_backend(&ctx.state, &model_id, request_id, &ctx.tx).await {
@@ -1218,7 +1359,13 @@ async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
     };
 
     if let Err(e) = backend.validate_inputs(&inputs) {
-        send_error(&ctx.tx, request_id, ErrorCode::InvalidInput, format!("Invalid inputs: {}", e)).await;
+        send_error(
+            &ctx.tx,
+            request_id,
+            ErrorCode::InvalidInput,
+            format!("Invalid inputs: {}", e),
+        )
+        .await;
         return;
     }
 
@@ -1228,23 +1375,40 @@ async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
     };
 
     // Resolve bands — for infer, band config comes from `options`.
-    let mut bands = match resolve_band_selection(&ctx.state, &image_id, Some(&options), request_id, &ctx.tx).await {
-        Some(b) => b,
-        None => return,
-    };
+    let mut bands =
+        match resolve_band_selection(&ctx.state, &image_id, Some(&options), request_id, &ctx.tx)
+            .await
+        {
+            Some(b) => b,
+            None => return,
+        };
 
     if !ensure_embedding_ready(&ctx, backend.as_ref(), &image_id, &mut bands, request_id).await {
         return;
     }
 
     let dimensions_only = backend.requires_embedding();
-    let loaded = match load_image_for_inference(&ctx.state, &ctx.streams, &image_id, &bands, dimensions_only, request_id, &ctx.tx).await {
+    let loaded = match load_image_for_inference(
+        &ctx.state,
+        &ctx.streams,
+        &image_id,
+        &bands,
+        dimensions_only,
+        request_id,
+        &ctx.tx,
+    )
+    .await
+    {
         Some(l) => l,
         None => return,
     };
 
     // For non-embedding backends, cache_key is the plain image_id.
-    let cache_key = if backend.requires_embedding() { loaded.cache_key } else { image_id.clone() };
+    let cache_key = if backend.requires_embedding() {
+        loaded.cache_key
+    } else {
+        image_id.clone()
+    };
 
     let image_context = crate::inference::ImageContext {
         image_id: cache_key,
@@ -1253,7 +1417,15 @@ async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
         height: loaded.height,
     };
 
-    match backend.infer(&image_context, inputs, options, make_progress_callback(&ctx.tx, request_id)).await {
+    match backend
+        .infer(
+            &image_context,
+            inputs,
+            options,
+            make_progress_callback(&ctx.tx, request_id),
+        )
+        .await
+    {
         Ok(result) => {
             let result_json = serde_json::json!({
                 "model_id": result.model_id,
@@ -1265,12 +1437,19 @@ async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
             ctx.tx.send(Message::Binary(msg.into())).await.ok();
             tracing::debug!(
                 "Mux connection {}: inference complete ({}ms)",
-                ctx.connection_id, result.timing_ms
+                ctx.connection_id,
+                result.timing_ms
             );
         }
         Err(e) => {
             tracing::error!("Inference failed: {}", e);
-            send_error(&ctx.tx, request_id, ErrorCode::ModelDecodeFailed, format!("Inference failed: {}", e)).await;
+            send_error(
+                &ctx.tx,
+                request_id,
+                ErrorCode::ModelDecodeFailed,
+                format!("Inference failed: {}", e),
+            )
+            .await;
         }
     }
 }

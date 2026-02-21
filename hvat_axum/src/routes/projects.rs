@@ -8,7 +8,7 @@ use std::{io::ErrorKind, path::PathBuf, sync::Arc};
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
@@ -67,7 +67,11 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/info", get(get_info))
         .route("/images", get(list_images))
-        .route("/images/upload", post(upload_images))
+        .route(
+            "/images/upload",
+            // Multipart uploads are streamed and validated in `upload_images` with explicit limits.
+            post(upload_images).layer(DefaultBodyLimit::disable()),
+        )
         .route(
             "/project-state",
             get(get_project_state).put(put_project_state),
@@ -255,12 +259,14 @@ async fn upload_images(
                 })?;
                 drop(output);
 
-                tokio::fs::rename(&temp_path, &destination).await.map_err(|err| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to finalize upload '{}': {err}", relative_path),
-                    )
-                })?;
+                tokio::fs::rename(&temp_path, &destination)
+                    .await
+                    .map_err(|err| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to finalize upload '{}': {err}", relative_path),
+                        )
+                    })?;
 
                 uploaded_files.push(relative_path);
             }
@@ -487,10 +493,7 @@ fn split_upload_segments(
         if allow_empty {
             return Ok(Vec::new());
         }
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Upload path is empty".to_string(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "Upload path is empty".to_string()));
     }
 
     if normalized.starts_with('/') {
@@ -528,10 +531,7 @@ fn split_upload_segments(
     }
 
     if !allow_empty && segments.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Upload path is empty".to_string(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "Upload path is empty".to_string()));
     }
 
     Ok(segments)
@@ -549,8 +549,8 @@ mod tests {
 
     #[test]
     fn split_upload_segments_normalizes_slashes() {
-        let segments = split_upload_segments(r"folder\\nested/file.png", false)
-            .expect("should normalize");
+        let segments =
+            split_upload_segments(r"folder\\nested/file.png", false).expect("should normalize");
         assert_eq!(segments, vec!["folder", "nested", "file.png"]);
     }
 
