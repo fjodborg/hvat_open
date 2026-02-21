@@ -505,14 +505,6 @@ fn calculate_pyramid_levels(width: u32, height: u32) -> Vec<PyramidLevel> {
         });
     }
 
-    // Reverse so highest level (smallest) is first
-    levels.reverse();
-
-    // Re-number levels (0 = thumbnail, highest = full res)
-    for (i, l) in levels.iter_mut().enumerate() {
-        l.level = i as u32;
-    }
-
     levels
 }
 

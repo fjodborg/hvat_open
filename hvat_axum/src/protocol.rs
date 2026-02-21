@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_capabilities_encoding_v2() {
-        use hvat_common::{ModelCapability, ModelType, ServerInfo, ServerLimits};
+        use hvat_common::{ModelCapability, ModelType, ServerFeatures, ServerInfo, ServerLimits};
         use std::collections::HashMap;
 
         let caps = ServerCapabilities {
@@ -306,6 +306,13 @@ mod tests {
                 max_pyramid_levels: 8,
                 max_concurrent_streams: 4,
                 max_concurrent_inferences: 2,
+            },
+            features: ServerFeatures {
+                streaming: true,
+                project_state: true,
+                downloads: true,
+                inference: true,
+                sam: true,
             },
             models: vec![ModelCapability {
                 id: "sam-tiny".to_string(),

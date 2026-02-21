@@ -448,6 +448,13 @@ pub struct ServerCapabilities {
     /// Resource limits
     pub limits: ServerLimits,
 
+    /// Supported backend feature set.
+    ///
+    /// This allows frontend clients to enable/disable UI surfaces without
+    /// guessing from endpoint behavior.
+    #[serde(default)]
+    pub features: ServerFeatures,
+
     /// Available models
     pub models: Vec<ModelCapability>,
 }
@@ -461,6 +468,7 @@ impl Default for ServerCapabilities {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
             limits: ServerLimits::default(),
+            features: ServerFeatures::default(),
             models: vec![],
         }
     }
@@ -477,12 +485,66 @@ impl ServerCapabilities {
         self.models.iter().any(|m| m.id == model_id)
     }
 
+    /// Find a SAM-compatible segmentation model.
+    ///
+    /// A model is considered SAM-compatible when it accepts `point_list`
+    /// inputs and returns `polygon_list` outputs.
+    pub fn find_sam_prompt_model(&self) -> Option<&ModelCapability> {
+        self.models.iter().find(|model| {
+            model.model_type == ModelType::Segmentation
+                && model
+                    .inputs
+                    .iter()
+                    .any(|input| input.input_type == "point_list")
+                && model
+                    .outputs
+                    .iter()
+                    .any(|output| output.output_type == "polygon_list")
+        })
+    }
+
+    /// Whether inference is supported.
+    ///
+    /// For backwards compatibility with older servers that don't emit
+    /// `features`, a non-empty model list is also treated as inference support.
+    pub fn supports_inference(&self) -> bool {
+        self.features.inference || !self.models.is_empty()
+    }
+
+    /// Whether SAM-style interactive segmentation is supported.
+    ///
+    /// For backwards compatibility with older servers that don't emit
+    /// `features`, this also checks for a SAM-compatible model in `models`.
+    pub fn supports_sam(&self) -> bool {
+        self.features.sam || self.find_sam_prompt_model().is_some()
+    }
+
     /// Check if client version is compatible with server.
     pub fn is_compatible(&self, client_version: u8) -> bool {
         // For now, require exact match. In the future, we might allow
         // minor version differences.
         self.protocol_version == client_version
     }
+}
+
+/// Optional feature flags announced by the backend.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ServerFeatures {
+    /// Supports image streaming over `/api/ws`.
+    #[serde(default)]
+    pub streaming: bool,
+    /// Supports HTTP project state persistence endpoints.
+    #[serde(default)]
+    pub project_state: bool,
+    /// Supports HTTP image download endpoints.
+    #[serde(default)]
+    pub downloads: bool,
+    /// Supports model inference over `/api/ws`.
+    #[serde(default)]
+    pub inference: bool,
+    /// Supports SAM-style interactive segmentation.
+    #[serde(default)]
+    pub sam: bool,
 }
 
 /// Model type category for UI hints.
@@ -633,6 +695,7 @@ mod tests {
         assert_eq!(caps.protocol_version, PROTOCOL_VERSION);
         assert!(caps.models.is_empty());
         assert_eq!(caps.server.name, "hvat-axum");
+        assert_eq!(caps.features, ServerFeatures::default());
     }
 
     #[test]
@@ -670,6 +733,13 @@ mod tests {
                 max_concurrent_streams: 2,
                 max_concurrent_inferences: 1,
             },
+            features: ServerFeatures {
+                streaming: true,
+                project_state: true,
+                downloads: true,
+                inference: true,
+                sam: false,
+            },
             models: vec![ModelCapability {
                 id: "test-model".to_string(),
                 name: "Test Model".to_string(),
@@ -695,6 +765,67 @@ mod tests {
         let json = serde_json::to_string(&caps).unwrap();
         let decoded: ServerCapabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, caps);
+    }
+
+    #[test]
+    fn test_capabilities_deserialize_without_features_defaults() {
+        let json = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "server": {
+                "name": "legacy",
+                "version": "0.0.1"
+            },
+            "limits": {
+                "max_image_size": 1024,
+                "max_pyramid_levels": 4,
+                "max_concurrent_streams": 2,
+                "max_concurrent_inferences": 1
+            },
+            "models": []
+        });
+
+        let decoded: ServerCapabilities = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.features, ServerFeatures::default());
+        assert!(!decoded.supports_inference());
+        assert!(!decoded.supports_sam());
+    }
+
+    #[test]
+    fn test_find_sam_prompt_model_from_capabilities() {
+        let mut caps = ServerCapabilities::default();
+        caps.models.push(ModelCapability {
+            id: "sam-like".to_string(),
+            name: "SAM Like".to_string(),
+            model_type: ModelType::Segmentation,
+            description: String::new(),
+            inputs: vec![
+                InputSchema {
+                    name: "points".to_string(),
+                    input_type: "point_list".to_string(),
+                    required: true,
+                    description: String::new(),
+                },
+                InputSchema {
+                    name: "box".to_string(),
+                    input_type: "bbox".to_string(),
+                    required: false,
+                    description: String::new(),
+                },
+            ],
+            outputs: vec![OutputSchema {
+                name: "polygons".to_string(),
+                output_type: "polygon_list".to_string(),
+                description: String::new(),
+            }],
+            options: HashMap::new(),
+            requires_embedding: true,
+            embedding_time_ms: 100,
+        });
+
+        let model = caps.find_sam_prompt_model().expect("SAM model not found");
+        assert_eq!(model.id, "sam-like");
+        assert!(caps.supports_inference());
+        assert!(caps.supports_sam());
     }
 
     #[test]
