@@ -1,9 +1,10 @@
 //! Server startup tasks including thumbnail pre-generation.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
+use hvat_backend_helper::catalog::collect_supported_image_paths;
 
 use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::state::AppState;
@@ -27,8 +28,7 @@ pub async fn pregenerate_pyramids(state: Arc<AppState>) {
     );
 
     // Collect all image paths
-    let mut image_paths = Vec::new();
-    collect_image_paths(&data_dir, &state, &mut image_paths);
+    let image_paths = collect_supported_image_paths(&data_dir, |path| state.loaders.supports(path));
 
     let total = image_paths.len();
     let concurrency_limit = state.config.pyramid_concurrency.max(1);
@@ -137,20 +137,6 @@ async fn pregenerate_single_image(
                 tracing::warn!("  -> Failed to mark pyramid as failed: {}", mark_err);
             }
             PregenOutcome::Failed
-        }
-    }
-}
-
-/// Recursively collect all image paths from a directory.
-fn collect_image_paths(dir: &Path, state: &AppState, paths: &mut Vec<std::path::PathBuf>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_image_paths(&path, state, paths);
-            } else if state.loaders.supports(&path) {
-                paths.push(path);
-            }
         }
     }
 }

@@ -1,6 +1,8 @@
 //! Shared utility functions for hvat_axum.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use hvat_backend_helper::catalog::find_supported_image_by_id;
 
 use crate::error::{Error, Result};
 use crate::state::AppState;
@@ -9,56 +11,17 @@ use crate::state::AppState;
 ///
 /// Preserves `-` and `_` characters.
 pub fn make_url_safe(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    hvat_backend_helper::catalog::make_url_safe(s)
 }
 
 /// Find an image file by its URL-safe ID.
 ///
 /// Searches recursively in the data directory for a file whose URL-safe path matches.
 pub fn find_image(state: &AppState, image_id: &str) -> Result<PathBuf> {
-    let data_dir = &state.config.data_dir;
-
-    search_for_image(data_dir, data_dir, image_id, state)
-        .ok_or_else(|| Error::ImageNotFound(image_id.to_string()))
-}
-
-/// Recursively search for an image matching the ID.
-fn search_for_image(
-    dir: &Path,
-    base_dir: &Path,
-    image_id: &str,
-    state: &AppState,
-) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = search_for_image(&path, base_dir, image_id, state) {
-                return Some(found);
-            }
-        } else if state.loaders.supports(&path) {
-            let relative_path = path
-                .strip_prefix(base_dir)
-                .unwrap_or(&path)
-                .to_string_lossy();
-
-            let file_id = make_url_safe(&relative_path);
-            if file_id == image_id {
-                return Some(path);
-            }
-        }
-    }
-
-    None
+    find_supported_image_by_id(&state.config.data_dir, image_id, |path| {
+        state.loaders.supports(path)
+    })
+    .ok_or_else(|| Error::ImageNotFound(image_id.to_string()))
 }
 
 #[cfg(test)]

@@ -192,17 +192,6 @@ pub fn calculate_level_dimensions(full_width: u32, full_height: u32, level: u32)
     ((full_width / scale).max(1), (full_height / scale).max(1))
 }
 
-// Implement Clone for BandData since we need it
-impl Clone for BandData {
-    fn clone(&self) -> Self {
-        Self {
-            width: self.width,
-            height: self.height,
-            bands: self.bands.clone(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
+use hvat_backend_helper::websocket::current_timestamp_ms;
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 
@@ -2038,15 +2039,6 @@ fn calculate_level_size(full_width: u32, full_height: u32, level: u32) -> (u32, 
     let width = (full_width / scale).max(1);
     let height = (full_height / scale).max(1);
     (width, height)
-}
-
-/// Get current timestamp in milliseconds.
-fn current_timestamp_ms() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Build server capabilities.

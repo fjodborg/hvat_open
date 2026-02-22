@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::ServerConfig;
 use crate::inference::{ModelRegistry, SamInferenceAdapter};
-use crate::loaders::{ImageLoaderRegistry, NpyLoader, StandardImageLoader};
+use crate::loaders::ImageLoaderRegistry;
 use crate::pyramid::{FilesystemStorage, PyramidBuilder, PyramidStorage};
 use crate::sam::{EmbeddingCache, OnnxSamEngine, SamBackend};
 
@@ -56,9 +56,7 @@ impl AppState {
     /// Create new application state.
     pub fn new(config: ServerConfig) -> Self {
         // Register image loaders
-        let mut loaders = ImageLoaderRegistry::new();
-        loaders.register(Arc::new(StandardImageLoader::new()));
-        loaders.register(Arc::new(NpyLoader::new()));
+        let loaders = ImageLoaderRegistry::with_defaults();
 
         // Create pyramid storage
         let pyramid_storage: Arc<dyn PyramidStorage> =

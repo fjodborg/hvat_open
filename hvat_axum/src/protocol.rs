@@ -72,17 +72,15 @@ impl StreamMetadata {
     ///
     /// Format: `[version:u8][type:u8][request_id:u32][width:u32][height:u32][num_bands:u32][num_layers:u32][full_width:u32][full_height:u32]`
     pub fn to_bytes_mux(&self, request_id: u32) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(30);
-        buf.push(PROTOCOL_VERSION);
-        buf.push(ServerMessageType::Metadata.to_byte());
-        buf.extend_from_slice(&request_id.to_le_bytes());
-        buf.extend_from_slice(&self.width.to_le_bytes());
-        buf.extend_from_slice(&self.height.to_le_bytes());
-        buf.extend_from_slice(&self.num_bands.to_le_bytes());
-        buf.extend_from_slice(&self.num_layers.to_le_bytes());
-        buf.extend_from_slice(&self.full_width.to_le_bytes());
-        buf.extend_from_slice(&self.full_height.to_le_bytes());
-        buf
+        hvat_backend_helper::protocol::StreamMetadata {
+            width: self.width,
+            height: self.height,
+            num_bands: self.num_bands,
+            num_layers: self.num_layers,
+            full_width: self.full_width,
+            full_height: self.full_height,
+        }
+        .to_bytes_mux(request_id)
     }
 }
 
@@ -92,11 +90,7 @@ impl StreamMetadata {
 
 /// Encode a Reset message with request_id (multiplexed protocol).
 pub fn encode_reset_mux(request_id: u32) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(6);
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::Reset.to_byte());
-    buf.extend_from_slice(&request_id.to_le_bytes());
-    buf
+    hvat_backend_helper::protocol::encode_reset_mux(request_id)
 }
 
 /// Encode a layer chunk message with request_id (multiplexed protocol).
@@ -107,73 +101,47 @@ pub fn encode_layer_chunk_mux(
     row_end: u32,
     rgba_data: &[u8],
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(16 + rgba_data.len());
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::LayerChunk.to_byte());
-    buf.extend_from_slice(&request_id.to_le_bytes());
-    buf.extend_from_slice(&layer.to_le_bytes());
-    buf.extend_from_slice(&row_start.to_le_bytes());
-    buf.extend_from_slice(&row_end.to_le_bytes());
-    buf.extend_from_slice(rgba_data);
-    buf
+    hvat_backend_helper::protocol::encode_layer_chunk_mux(
+        request_id, layer, row_start, row_end, rgba_data,
+    )
 }
 
 /// Encode a layer complete message with request_id (multiplexed protocol).
 pub fn encode_layer_complete_mux(request_id: u32, layer: u16) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(8);
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::LayerComplete.to_byte());
-    buf.extend_from_slice(&request_id.to_le_bytes());
-    buf.extend_from_slice(&layer.to_le_bytes());
-    buf
+    hvat_backend_helper::protocol::encode_layer_complete_mux(request_id, layer)
 }
 
 /// Encode a level complete message with request_id (multiplexed protocol).
 pub fn encode_level_complete_mux(request_id: u32, level: u8) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(7);
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::LevelComplete.to_byte());
-    buf.extend_from_slice(&request_id.to_le_bytes());
-    buf.push(level);
-    buf
+    hvat_backend_helper::protocol::encode_level_complete_mux(request_id, level)
 }
 
 /// Encode a stream complete message with request_id (multiplexed protocol).
 ///
 /// This signals that all data for the given request_id has been sent.
 pub fn encode_stream_complete(request_id: u32) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(6);
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::StreamComplete.to_byte());
-    buf.extend_from_slice(&request_id.to_le_bytes());
-    buf
+    hvat_backend_helper::protocol::encode_stream_complete(request_id)
 }
 
 /// Encode a stream-specific error (multiplexed protocol).
 ///
 /// This sends an error for a specific stream without affecting other streams.
 pub fn encode_stream_error(request_id: u32, error: &ProtocolError) -> Vec<u8> {
-    let error_payload = error.encode_payload();
-    let mut buf = Vec::with_capacity(6 + error_payload.len());
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::StreamError.to_byte());
-    buf.extend_from_slice(&request_id.to_le_bytes());
-    buf.extend_from_slice(&error_payload);
-    buf
+    hvat_backend_helper::protocol::encode_stream_error(request_id, error)
 }
 
 /// Encode an error message using the new protocol.
 ///
 /// This is a convenience wrapper around `ProtocolError::encode()`.
 pub fn encode_error(error: &ProtocolError) -> Vec<u8> {
-    error.encode(PROTOCOL_VERSION)
+    hvat_backend_helper::protocol::encode_error(error)
 }
 
 /// Encode a simple error message from a string.
 ///
 /// Creates a non-retryable error with the given code and message.
 pub fn encode_simple_error(code: ErrorCode, message: &str) -> Vec<u8> {
-    ProtocolError::error(code, message).encode(PROTOCOL_VERSION)
+    hvat_backend_helper::protocol::encode_simple_error(code, message)
 }
 
 /// Encode a Ping message for keepalive.
@@ -183,12 +151,7 @@ pub fn encode_simple_error(code: ErrorCode, message: &str) -> Vec<u8> {
 /// The timestamp is typically the server's monotonic time in milliseconds,
 /// which the client echoes back in a Pong message.
 pub fn encode_ping(timestamp: u64) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(14);
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::Ping.to_byte());
-    buf.extend_from_slice(&0u32.to_le_bytes()); // request_id = 0 for connection-level
-    buf.extend_from_slice(&timestamp.to_le_bytes());
-    buf
+    hvat_backend_helper::protocol::encode_ping(timestamp)
 }
 
 // ============================================================================
@@ -201,14 +164,7 @@ pub fn encode_ping(timestamp: u64) -> Vec<u8> {
 ///
 /// Format: `[version:u8][type:u8][request_id:u32][image_id_len:u16][image_id:utf8]`
 pub fn encode_image_set(request_id: u32, image_id: &str) -> Vec<u8> {
-    let image_id_bytes = image_id.as_bytes();
-    let mut buf = Vec::with_capacity(8 + image_id_bytes.len());
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::ImageSet.to_byte());
-    buf.extend_from_slice(&request_id.to_le_bytes());
-    buf.extend_from_slice(&(image_id_bytes.len() as u16).to_le_bytes());
-    buf.extend_from_slice(image_id_bytes);
-    buf
+    hvat_backend_helper::protocol::encode_image_set(request_id, image_id)
 }
 
 /// Encode a ModelReady message (multiplexed protocol).
@@ -217,14 +173,7 @@ pub fn encode_image_set(request_id: u32, image_id: &str) -> Vec<u8> {
 ///
 /// Format: `[version:u8][type:u8][request_id:u32][model_id_len:u16][model_id:utf8]`
 pub fn encode_model_ready(request_id: u32, model_id: &str) -> Vec<u8> {
-    let model_id_bytes = model_id.as_bytes();
-    let mut buf = Vec::with_capacity(8 + model_id_bytes.len());
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::ModelReady.to_byte());
-    buf.extend_from_slice(&request_id.to_le_bytes());
-    buf.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
-    buf.extend_from_slice(model_id_bytes);
-    buf
+    hvat_backend_helper::protocol::encode_model_ready(request_id, model_id)
 }
 
 /// Encode an InferProgress message (multiplexed protocol).
@@ -233,15 +182,7 @@ pub fn encode_model_ready(request_id: u32, model_id: &str) -> Vec<u8> {
 ///
 /// Format: `[version:u8][type:u8][request_id:u32][progress:u8][status_len:u16][status:utf8]`
 pub fn encode_infer_progress(request_id: u32, progress: u8, status: &str) -> Vec<u8> {
-    let status_bytes = status.as_bytes();
-    let mut buf = Vec::with_capacity(9 + status_bytes.len());
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::InferProgress.to_byte());
-    buf.extend_from_slice(&request_id.to_le_bytes());
-    buf.push(progress);
-    buf.extend_from_slice(&(status_bytes.len() as u16).to_le_bytes());
-    buf.extend_from_slice(status_bytes);
-    buf
+    hvat_backend_helper::protocol::encode_infer_progress(request_id, progress, status)
 }
 
 /// Encode an InferResult message (multiplexed protocol).
@@ -250,13 +191,7 @@ pub fn encode_infer_progress(request_id: u32, progress: u8, status: &str) -> Vec
 ///
 /// Format: `[version:u8][type:u8][request_id:u32][json_payload:utf8]`
 pub fn encode_infer_result(request_id: u32, result_json: &str) -> Vec<u8> {
-    let json_bytes = result_json.as_bytes();
-    let mut buf = Vec::with_capacity(6 + json_bytes.len());
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::InferResult.to_byte());
-    buf.extend_from_slice(&request_id.to_le_bytes());
-    buf.extend_from_slice(json_bytes);
-    buf
+    hvat_backend_helper::protocol::encode_infer_result(request_id, result_json)
 }
 
 /// Encode server capabilities as JSON (Protocol v2).
@@ -266,14 +201,7 @@ pub fn encode_infer_result(request_id: u32, result_json: &str) -> Vec<u8> {
 ///
 /// Format: `[version:u8][type:u8][request_id=0:u32][json_payload:utf8]`
 pub fn encode_capabilities_v2(capabilities: &hvat_common::ServerCapabilities) -> Vec<u8> {
-    let json = serde_json::to_string(capabilities).unwrap();
-    let json_bytes = json.as_bytes();
-    let mut buf = Vec::with_capacity(6 + json_bytes.len());
-    buf.push(PROTOCOL_VERSION);
-    buf.push(ServerMessageType::Capabilities.to_byte());
-    buf.extend_from_slice(&0u32.to_le_bytes()); // request_id = 0 for connection-level
-    buf.extend_from_slice(json_bytes);
-    buf
+    hvat_backend_helper::protocol::encode_capabilities_v2(capabilities)
 }
 
 #[cfg(test)]

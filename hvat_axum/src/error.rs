@@ -36,6 +36,23 @@ pub enum Error {
     Internal(String),
 }
 
+impl From<hvat_backend_helper::error::Error> for Error {
+    fn from(value: hvat_backend_helper::error::Error) -> Self {
+        match value {
+            hvat_backend_helper::error::Error::ImageNotFound(msg) => Self::ImageNotFound(msg),
+            hvat_backend_helper::error::Error::ProjectNotFound(msg) => Self::ProjectNotFound(msg),
+            hvat_backend_helper::error::Error::UnsupportedFormat(msg) => {
+                Self::UnsupportedFormat(msg)
+            }
+            hvat_backend_helper::error::Error::InvalidImageData(msg) => Self::InvalidImageData(msg),
+            hvat_backend_helper::error::Error::PyramidNotReady(msg) => Self::PyramidNotReady(msg),
+            hvat_backend_helper::error::Error::Io(err) => Self::Io(err),
+            hvat_backend_helper::error::Error::Image(err) => Self::Image(err),
+            hvat_backend_helper::error::Error::Internal(msg) => Self::Internal(msg),
+        }
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, message) = match &self {

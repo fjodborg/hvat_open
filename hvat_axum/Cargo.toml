@@ -13,6 +13,7 @@ sam-cuda = ["ort/cuda"]
 [dependencies]
 # Shared utilities
 hvat_common = { path = "../hvat_common" }
+hvat_backend_helper = { path = "../hvat_backend_helper" }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "multipart", "ws"] }

@@ -79,18 +79,20 @@ async fn setup_test_server() -> Option<TestContext> {
         .expect("Failed to write nested image");
 
     let config = ServerConfig {
-        port: 0, // Let OS assign port
-        data_dir: temp_dir.path().to_path_buf(),
-        cache_dir: cache_dir.path().to_path_buf(),
-        max_cache_memory: 100 * 1024 * 1024,
+        base: hvat_backend_helper::config::ServerConfig {
+            port: 0, // Let OS assign port
+            data_dir: temp_dir.path().to_path_buf(),
+            cache_dir: cache_dir.path().to_path_buf(),
+            max_cache_memory: 100 * 1024 * 1024,
+            max_user_streams: 4,
+            max_connections: 100,
+            ping_interval_secs: 30,
+            connection_timeout_secs: 90,
+            stream_chunk_rows: 128,
+            project_name: "test_project".to_string(),
+        },
         max_user_memory: 50 * 1024 * 1024,
-        max_user_streams: 4,
-        max_connections: 100,
-        ping_interval_secs: 30,
-        connection_timeout_secs: 90,
-        stream_chunk_rows: 128,
         pyramid_concurrency: 2,
-        project_name: "test_project".to_string(),
         sam_enabled: false,
         sam_model_dir: PathBuf::from("./.cache/models"),
         sam_variant: SamVariant::Tiny,
@@ -426,18 +428,20 @@ async fn test_sam_enabled_but_models_missing_should_error() {
     // with a clear error message instead of silently disabling SAM.
 
     let config = ServerConfig {
-        port: 0,
-        data_dir: std::path::PathBuf::from("../hvat_visual_tests/test_input"),
-        cache_dir: std::path::PathBuf::from("./.cache/pyramids"),
-        max_cache_memory: 100 * 1024 * 1024,
+        base: hvat_backend_helper::config::ServerConfig {
+            port: 0,
+            data_dir: std::path::PathBuf::from("../hvat_visual_tests/test_input"),
+            cache_dir: std::path::PathBuf::from("./.cache/pyramids"),
+            max_cache_memory: 100 * 1024 * 1024,
+            max_user_streams: 4,
+            max_connections: 100,
+            ping_interval_secs: 30,
+            connection_timeout_secs: 90,
+            stream_chunk_rows: 128,
+            project_name: "test_input".to_string(),
+        },
         max_user_memory: 50 * 1024 * 1024,
-        max_user_streams: 4,
-        max_connections: 100,
-        ping_interval_secs: 30,
-        connection_timeout_secs: 90,
-        stream_chunk_rows: 128,
         pyramid_concurrency: 2,
-        project_name: "test_input".to_string(),
         sam_enabled: true, // <-- USER ENABLED SAM
         sam_model_dir: std::path::PathBuf::from("/nonexistent/path/to/models"), // Models don't exist
         sam_variant: SamVariant::Tiny,
@@ -460,18 +464,20 @@ async fn start_test_server_with_sam() -> Option<SocketAddr> {
     }
 
     let config = ServerConfig {
-        port: 0,
-        data_dir: std::path::PathBuf::from("../hvat_visual_tests/test_input"),
-        cache_dir: std::path::PathBuf::from("./.cache/pyramids"),
-        max_cache_memory: 100 * 1024 * 1024,
+        base: hvat_backend_helper::config::ServerConfig {
+            port: 0,
+            data_dir: std::path::PathBuf::from("../hvat_visual_tests/test_input"),
+            cache_dir: std::path::PathBuf::from("./.cache/pyramids"),
+            max_cache_memory: 100 * 1024 * 1024,
+            max_user_streams: 4,
+            max_connections: 100,
+            ping_interval_secs: 30,
+            connection_timeout_secs: 90,
+            stream_chunk_rows: 128,
+            project_name: "test_input".to_string(),
+        },
         max_user_memory: 50 * 1024 * 1024,
-        max_user_streams: 4,
-        max_connections: 100,
-        ping_interval_secs: 30,
-        connection_timeout_secs: 90,
-        stream_chunk_rows: 128,
         pyramid_concurrency: 2,
-        project_name: "test_input".to_string(),
         sam_enabled: true,
         sam_model_dir: model_dir,
         sam_variant: SamVariant::Tiny,
@@ -679,18 +685,20 @@ async fn test_progressive_streaming_sends_multiple_levels() {
     std::fs::write(&test_image_path, bytes).expect("Failed to write test image");
 
     let config = ServerConfig {
-        port: 0,
-        data_dir: temp_dir.path().to_path_buf(),
-        cache_dir: cache_dir.path().to_path_buf(),
-        max_cache_memory: 100 * 1024 * 1024,
+        base: hvat_backend_helper::config::ServerConfig {
+            port: 0,
+            data_dir: temp_dir.path().to_path_buf(),
+            cache_dir: cache_dir.path().to_path_buf(),
+            max_cache_memory: 100 * 1024 * 1024,
+            max_user_streams: 4,
+            max_connections: 100,
+            ping_interval_secs: 30,
+            connection_timeout_secs: 90,
+            stream_chunk_rows: 128,
+            project_name: "test_project".to_string(),
+        },
         max_user_memory: 50 * 1024 * 1024,
-        max_user_streams: 4,
-        max_connections: 100,
-        ping_interval_secs: 30,
-        connection_timeout_secs: 90,
-        stream_chunk_rows: 128,
         pyramid_concurrency: 2,
-        project_name: "test_project".to_string(),
         sam_enabled: false,
         sam_model_dir: PathBuf::from("./.cache/models"),
         sam_variant: SamVariant::Tiny,

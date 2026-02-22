@@ -1,21 +1,17 @@
 //! RGBA band packing for GPU-ready data.
 //!
-//! Re-exports the shared packing logic from hvat_common and provides
-//! the BandPacker trait for the server's pyramid builder.
-
-use rayon::prelude::*;
+//! Re-exports shared packing and downsampling logic from `hvat_backend_helper`
+//! and provides the `BandPacker` trait for the pyramid builder.
 
 use crate::loaders::BandData;
 
-// Re-export from hvat_common for use in this crate
-pub use hvat_common::packing::{BANDS_PER_LAYER, MIN_TEXTURE_LAYERS, pack_bands_to_rgba_layers};
-use hvat_common::{bilinear_sample, pixel_count};
+pub use hvat_backend_helper::packer::{
+    BANDS_PER_LAYER, MIN_TEXTURE_LAYERS, downsample_bands, pack_bands_to_rgba_layers,
+};
 
 /// Trait for packing band data into GPU-ready formats.
 pub trait BandPacker: Send + Sync {
     /// Pack f32 bands into RGBA u8 layers (4 bands per layer).
-    ///
-    /// Returns a vector of (layer_index, rgba_data) pairs.
     fn pack_to_rgba(&self, bands: &BandData) -> Vec<(u32, Vec<u8>)>;
 
     /// Downsample bands to target resolution.
@@ -39,62 +35,11 @@ impl Default for DefaultBandPacker {
 
 impl BandPacker for DefaultBandPacker {
     fn pack_to_rgba(&self, bands: &BandData) -> Vec<(u32, Vec<u8>)> {
-        // Use the shared packing function from hvat_common
         pack_bands_to_rgba_layers(&bands.bands, bands.width, bands.height)
     }
 
     fn downsample(&self, bands: &BandData, target_width: u32, target_height: u32) -> BandData {
         downsample_bands(bands, target_width, target_height)
-    }
-}
-
-/// Downsample band data to target resolution using bilinear interpolation.
-///
-/// Uses Rayon to process bands in parallel for better performance on
-/// hyperspectral images with many bands (100+).
-pub fn downsample_bands(bands: &BandData, target_width: u32, target_height: u32) -> BandData {
-    let src_width = bands.width as usize;
-    let src_height = bands.height as usize;
-    let dst_width = target_width as usize;
-    let dst_height = target_height as usize;
-
-    if src_width == dst_width && src_height == dst_height {
-        // No downsampling needed, clone the data
-        return BandData {
-            width: bands.width,
-            height: bands.height,
-            bands: bands.bands.clone(),
-        };
-    }
-
-    let x_scale = src_width as f32 / dst_width as f32;
-    let y_scale = src_height as f32 / dst_height as f32;
-
-    // Process bands in parallel using Rayon
-    let downsampled_bands: Vec<Vec<f32>> = bands
-        .bands
-        .par_iter()
-        .map(|band| {
-            let mut downsampled = Vec::with_capacity(pixel_count(dst_width, dst_height));
-
-            for dst_y in 0..dst_height {
-                for dst_x in 0..dst_width {
-                    // Map destination pixel to source coordinates
-                    let src_x = (dst_x as f32 + 0.5) * x_scale - 0.5;
-                    let src_y = (dst_y as f32 + 0.5) * y_scale - 0.5;
-
-                    downsampled.push(bilinear_sample(band, src_width, src_height, src_x, src_y));
-                }
-            }
-
-            downsampled
-        })
-        .collect();
-
-    BandData {
-        width: target_width,
-        height: target_height,
-        bands: downsampled_bands,
     }
 }
 
@@ -118,11 +63,10 @@ mod tests {
         assert_eq!(downsampled.height, 2);
         assert_eq!(downsampled.bands.len(), 1);
 
-        // Each 2x2 block should average to its dominant value
         let band = &downsampled.bands[0];
-        assert!(band[0] > 0.5); // Top-left was all 1.0
-        assert!(band[1] < 0.5); // Top-right was all 0.0
-        assert!(band[2] < 0.5); // Bottom-left was all 0.0
-        assert!(band[3] > 0.5); // Bottom-right was all 1.0
+        assert!(band[0] > 0.5);
+        assert!(band[1] < 0.5);
+        assert!(band[2] < 0.5);
+        assert!(band[3] > 0.5);
     }
 }

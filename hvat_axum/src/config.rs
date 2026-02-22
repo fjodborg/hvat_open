@@ -1,66 +1,32 @@
 //! Server configuration.
 
+use std::ops::Deref;
 use std::path::PathBuf;
 
 use clap::Parser;
+use hvat_backend_helper::config::{BaseCliArgs, ServerConfig as BaseServerConfig};
 
 use crate::sam::{ExecutionProvider, SamVariant};
 
-/// HVAT Axum Server - Hyperspectral image streaming server.
+/// HVAT Axum Server CLI arguments.
+///
+/// The shared backend options are flattened from `BaseCliArgs`, while this
+/// crate adds axum-specific options (pyramid pregen + SAM integration).
 #[derive(Parser, Debug, Clone)]
 #[command(name = "hvat-server")]
 #[command(about = "HVAT API server for hyperspectral image streaming")]
 #[command(version)]
 pub struct CliArgs {
-    /// Port to listen on
-    #[arg(short, long, default_value = "3000", env = "HVAT_PORT")]
-    pub port: u16,
-
-    /// Root directory containing images to serve.
-    /// This becomes the "project" that clients connect to.
-    #[arg(short, long, default_value = "./data", env = "HVAT_DATA_DIR")]
-    pub data_dir: PathBuf,
-
-    /// Directory for pyramid cache
-    #[arg(long, default_value = "./.cache/pyramids", env = "HVAT_CACHE_DIR")]
-    pub cache_dir: PathBuf,
-
-    /// Maximum total memory for pyramid cache in MB
-    #[arg(long, default_value = "2048", env = "HVAT_MAX_CACHE_MB")]
-    pub max_cache_mb: u64,
+    #[command(flatten)]
+    pub base: BaseCliArgs,
 
     /// Maximum memory per user session in MB
     #[arg(long, default_value = "500", env = "HVAT_MAX_USER_MB")]
     pub max_user_mb: u64,
 
-    /// Maximum concurrent streams per user
-    #[arg(long, default_value = "4", env = "HVAT_MAX_STREAMS")]
-    pub max_streams: usize,
-
-    /// Maximum total WebSocket connections
-    #[arg(long, default_value = "100", env = "HVAT_MAX_CONNECTIONS")]
-    pub max_connections: usize,
-
-    /// WebSocket ping interval in seconds (0 to disable)
-    #[arg(long, default_value = "30", env = "HVAT_PING_INTERVAL")]
-    pub ping_interval: u64,
-
-    /// WebSocket connection timeout in seconds (no pong response)
-    #[arg(long, default_value = "90", env = "HVAT_CONNECTION_TIMEOUT")]
-    pub connection_timeout: u64,
-
-    /// Number of rows to send per WebSocket message
-    #[arg(long, default_value = "128", env = "HVAT_CHUNK_ROWS")]
-    pub chunk_rows: u32,
-
     /// Maximum concurrent pyramid pre-generation jobs at startup
     #[arg(long, default_value = "2", env = "HVAT_PYRAMID_CONCURRENCY")]
     pub pyramid_concurrency: usize,
-
-    /// Project name (display name for this server/data directory).
-    /// Defaults to the data directory name.
-    #[arg(short = 'n', long, env = "HVAT_PROJECT_NAME")]
-    pub name: Option<String>,
 
     // --- SAM Configuration ---
     /// Enable SAM (Segment Anything Model) integration.
@@ -87,41 +53,14 @@ pub struct CliArgs {
 /// Server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Port to listen on
-    pub port: u16,
-
-    /// Root directory for images (the "project")
-    pub data_dir: PathBuf,
-
-    /// Directory for pyramid cache
-    pub cache_dir: PathBuf,
-
-    /// Maximum total memory for pyramid cache in bytes
-    pub max_cache_memory: u64,
+    /// Shared backend configuration.
+    pub base: BaseServerConfig,
 
     /// Maximum memory per user session in bytes
     pub max_user_memory: u64,
 
-    /// Maximum concurrent streams per user
-    pub max_user_streams: usize,
-
-    /// Maximum total WebSocket connections
-    pub max_connections: usize,
-
-    /// WebSocket ping interval in seconds (0 to disable keepalive)
-    pub ping_interval_secs: u64,
-
-    /// WebSocket connection timeout in seconds (no pong response)
-    pub connection_timeout_secs: u64,
-
-    /// Number of rows to send per WebSocket message
-    pub stream_chunk_rows: u32,
-
     /// Maximum concurrent pyramid pre-generation jobs at startup
     pub pyramid_concurrency: usize,
-
-    /// Project name (display name)
-    pub project_name: String,
 
     // --- SAM Configuration ---
     /// Enable SAM integration
@@ -140,21 +79,20 @@ pub struct ServerConfig {
     pub sam_cache_size: usize,
 }
 
+impl Deref for ServerConfig {
+    type Target = BaseServerConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            port: 3000,
-            data_dir: PathBuf::from("./data"),
-            cache_dir: PathBuf::from("./.cache/pyramids"),
-            max_cache_memory: 2 * 1024 * 1024 * 1024, // 2GB
-            max_user_memory: 500 * 1024 * 1024,       // 500MB
-            max_user_streams: 4,
-            max_connections: 100,
-            ping_interval_secs: 30,
-            connection_timeout_secs: 90,
-            stream_chunk_rows: 128,
+            base: BaseServerConfig::default(),
+            max_user_memory: 500 * 1024 * 1024, // 500MB
             pyramid_concurrency: 2,
-            project_name: "data".to_string(),
             // SAM defaults
             sam_enabled: false,
             sam_model_dir: crate::sam::models::default_model_dir(),
@@ -172,47 +110,24 @@ impl ServerConfig {
     ///
     /// Panics if SAM-specific flags are used without `--sam-enabled`.
     pub fn from_cli(args: CliArgs) -> Self {
-        // Validate SAM configuration - error if SAM flags used without --sam-enabled
         Self::validate_sam_flags(&args);
 
-        // Derive project name from data_dir if not specified
-        let project_name = args.name.unwrap_or_else(|| {
-            args.data_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("project")
-                .to_string()
-        });
+        let base = BaseServerConfig::from_base_cli(args.base);
 
-        // Parse SAM variant
         let sam_variant = args.sam_variant.parse().unwrap_or_default();
-
-        // Parse SAM provider (auto = detect best available)
         let sam_provider = if args.sam_provider == "auto" {
             crate::sam::engine::detect_best_provider()
         } else {
             args.sam_provider.parse().unwrap_or_default()
         };
-
-        // SAM model directory
         let sam_model_dir = args
             .sam_model_dir
             .unwrap_or_else(crate::sam::models::default_model_dir);
 
         Self {
-            port: args.port,
-            data_dir: args.data_dir,
-            cache_dir: args.cache_dir,
-            max_cache_memory: args.max_cache_mb * 1024 * 1024,
+            base,
             max_user_memory: args.max_user_mb * 1024 * 1024,
-            max_user_streams: args.max_streams,
-            max_connections: args.max_connections,
-            ping_interval_secs: args.ping_interval,
-            connection_timeout_secs: args.connection_timeout,
-            stream_chunk_rows: args.chunk_rows,
             pyramid_concurrency: args.pyramid_concurrency.max(1),
-            project_name,
-            // SAM
             sam_enabled: args.sam_enabled,
             sam_model_dir,
             sam_variant,
@@ -226,10 +141,9 @@ impl ServerConfig {
     /// Panics if SAM-specific flags are used without `--sam-enabled`.
     fn validate_sam_flags(args: &CliArgs) {
         if args.sam_enabled {
-            return; // All good, SAM is enabled
+            return;
         }
 
-        // Check if any SAM-specific flags were explicitly set (not defaults)
         let has_custom_variant = args.sam_variant != "tiny";
         let has_custom_provider = args.sam_provider != "auto";
         let has_custom_model_dir = args.sam_model_dir.is_some();
@@ -267,7 +181,6 @@ impl ServerConfig {
 
     /// Load configuration from environment variables.
     pub fn from_env() -> Self {
-        // Parse CLI args which also reads env vars via clap
         Self::from_cli(CliArgs::parse())
     }
 }
