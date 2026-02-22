@@ -292,7 +292,9 @@ mod tests {
 
     #[test]
     fn test_capabilities_encoding_v2() {
-        use hvat_common::{ModelCapability, ModelType, ServerFeatures, ServerInfo, ServerLimits};
+        use hvat_common::{
+            DownloadMode, ModelCapability, ModelType, ServerFeatures, ServerInfo, ServerLimits,
+        };
         use std::collections::HashMap;
 
         let caps = ServerCapabilities {
@@ -314,6 +316,7 @@ mod tests {
                 inference: true,
                 sam: true,
             },
+            download_mode: DownloadMode::Chunked,
             models: vec![ModelCapability {
                 id: "sam-tiny".to_string(),
                 name: "SAM Tiny".to_string(),

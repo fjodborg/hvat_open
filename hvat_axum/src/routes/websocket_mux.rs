@@ -2051,7 +2051,7 @@ fn current_timestamp_ms() -> u64 {
 
 /// Build server capabilities.
 fn build_server_capabilities(state: &AppState) -> ServerCapabilities {
-    use hvat_common::{ServerFeatures, ServerInfo, ServerLimits};
+    use hvat_common::{DownloadMode, ServerFeatures, ServerInfo, ServerLimits};
 
     let models = if let Some(ref registry) = state.model_registry {
         registry.capabilities()
@@ -2079,6 +2079,7 @@ fn build_server_capabilities(state: &AppState) -> ServerCapabilities {
             inference: inference_enabled,
             sam: false,
         },
+        download_mode: DownloadMode::Chunked,
         models,
     };
     capabilities.features.sam = capabilities.find_sam_prompt_model().is_some();
@@ -2131,6 +2132,7 @@ mod tests {
         assert!(caps.features.streaming);
         assert!(caps.features.project_state);
         assert!(caps.features.downloads);
+        assert!(caps.supports_chunked_downloads());
         assert!(!caps.features.inference);
         assert!(!caps.features.sam);
         assert!(caps.models.is_empty());

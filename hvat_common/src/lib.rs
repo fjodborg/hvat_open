@@ -17,9 +17,9 @@ pub use error::{ErrorContext, ProtocolError};
 pub use interpolation::bilinear_sample;
 pub use packing::{BANDS_PER_LAYER, BandSlice, MIN_TEXTURE_LAYERS, pack_bands_to_rgba_layers};
 pub use protocol::{
-    ClientMessage, ErrorCategory, ErrorCode, InputSchema, ModelCapability, ModelType, OptionSchema,
-    OutputSchema, PROTOCOL_VERSION, ServerCapabilities, ServerFeatures, ServerInfo, ServerLimits,
-    ServerMessageType, Severity,
+    ClientMessage, DownloadMode, ErrorCategory, ErrorCode, InputSchema, ModelCapability, ModelType,
+    OptionSchema, OutputSchema, PROTOCOL_VERSION, ServerCapabilities, ServerFeatures, ServerInfo,
+    ServerLimits, ServerMessageType, Severity,
 };
 pub use pyramid::{MAX_PYRAMID_LEVEL, PyramidLevel};
 

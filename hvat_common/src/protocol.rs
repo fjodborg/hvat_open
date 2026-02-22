@@ -455,6 +455,13 @@ pub struct ServerCapabilities {
     #[serde(default)]
     pub features: ServerFeatures,
 
+    /// Image-download behavior contract for this backend.
+    ///
+    /// Backends that don't provide this field (older versions) deserialize to
+    /// `DownloadMode::Unknown`, and clients should use compatibility probing.
+    #[serde(default)]
+    pub download_mode: DownloadMode,
+
     /// Available models
     pub models: Vec<ModelCapability>,
 }
@@ -469,6 +476,7 @@ impl Default for ServerCapabilities {
             },
             limits: ServerLimits::default(),
             features: ServerFeatures::default(),
+            download_mode: DownloadMode::Unknown,
             models: vec![],
         }
     }
@@ -509,6 +517,11 @@ impl ServerCapabilities {
         self.features.sam || self.find_sam_prompt_model().is_some()
     }
 
+    /// Whether the backend declares support for chunked HTTP image downloads.
+    pub fn supports_chunked_downloads(&self) -> bool {
+        matches!(self.download_mode, DownloadMode::Chunked)
+    }
+
     /// Check if client version is compatible with server.
     pub fn is_compatible(&self, client_version: u8) -> bool {
         // For now, require exact match. In the future, we might allow
@@ -535,6 +548,19 @@ pub struct ServerFeatures {
     /// Supports SAM-style interactive segmentation.
     #[serde(default)]
     pub sam: bool,
+}
+
+/// Download transport mode announced by the backend.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadMode {
+    /// Backend did not explicitly declare a mode (legacy compatibility path).
+    #[default]
+    Unknown,
+    /// Backend supports only single-archive ZIP downloads.
+    SingleZip,
+    /// Backend supports chunked archive planning and part downloads.
+    Chunked,
 }
 
 /// Model type category for UI hints.
@@ -745,6 +771,7 @@ mod tests {
                 inference: true,
                 sam: false,
             },
+            download_mode: DownloadMode::Chunked,
             models: vec![ModelCapability {
                 id: "test-model".to_string(),
                 name: "Test Model".to_string(),
@@ -791,8 +818,38 @@ mod tests {
 
         let decoded: ServerCapabilities = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.features, ServerFeatures::default());
+        assert_eq!(decoded.download_mode, DownloadMode::Unknown);
         assert!(!decoded.supports_inference());
         assert!(!decoded.supports_sam());
+    }
+
+    #[test]
+    fn test_capabilities_deserialize_without_download_mode_defaults_unknown() {
+        let json = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "server": {
+                "name": "legacy",
+                "version": "0.0.1"
+            },
+            "limits": {
+                "max_image_size": 1024,
+                "max_pyramid_levels": 4,
+                "max_concurrent_streams": 2,
+                "max_concurrent_inferences": 1
+            },
+            "features": {
+                "streaming": true,
+                "project_state": true,
+                "downloads": true,
+                "inference": false,
+                "sam": false
+            },
+            "models": []
+        });
+
+        let decoded: ServerCapabilities = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.download_mode, DownloadMode::Unknown);
+        assert!(!decoded.supports_chunked_downloads());
     }
 
     #[test]

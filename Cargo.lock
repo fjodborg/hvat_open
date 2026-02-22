@@ -1963,6 +1963,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "hvat_backend_helper"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "clap",
+ "futures",
+ "hvat_common",
+ "image 0.25.9",
+ "ndarray 0.17.1",
+ "ndarray-npy",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "zip",
+]
+
+[[package]]
+name = "hvat_backend_simple"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "futures-util",
+ "hvat_backend_helper",
+ "hvat_common",
+ "image 0.25.9",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "hvat_common"
 version = "0.1.0"
 dependencies = [
