@@ -72,7 +72,7 @@ impl StreamMetadata {
     ///
     /// Format: `[version:u8][type:u8][request_id:u32][width:u32][height:u32][num_bands:u32][num_layers:u32][full_width:u32][full_height:u32]`
     pub fn to_bytes_mux(&self, request_id: u32) -> Vec<u8> {
-        hvat_backend_helper::protocol::StreamMetadata {
+        crate::common::protocol::StreamMetadata {
             width: self.width,
             height: self.height,
             num_bands: self.num_bands,
@@ -90,7 +90,7 @@ impl StreamMetadata {
 
 /// Encode a Reset message with request_id (multiplexed protocol).
 pub fn encode_reset_mux(request_id: u32) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_reset_mux(request_id)
+    crate::common::protocol::encode_reset_mux(request_id)
 }
 
 /// Encode a layer chunk message with request_id (multiplexed protocol).
@@ -101,47 +101,47 @@ pub fn encode_layer_chunk_mux(
     row_end: u32,
     rgba_data: &[u8],
 ) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_layer_chunk_mux(
+    crate::common::protocol::encode_layer_chunk_mux(
         request_id, layer, row_start, row_end, rgba_data,
     )
 }
 
 /// Encode a layer complete message with request_id (multiplexed protocol).
 pub fn encode_layer_complete_mux(request_id: u32, layer: u16) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_layer_complete_mux(request_id, layer)
+    crate::common::protocol::encode_layer_complete_mux(request_id, layer)
 }
 
 /// Encode a level complete message with request_id (multiplexed protocol).
 pub fn encode_level_complete_mux(request_id: u32, level: u8) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_level_complete_mux(request_id, level)
+    crate::common::protocol::encode_level_complete_mux(request_id, level)
 }
 
 /// Encode a stream complete message with request_id (multiplexed protocol).
 ///
 /// This signals that all data for the given request_id has been sent.
 pub fn encode_stream_complete(request_id: u32) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_stream_complete(request_id)
+    crate::common::protocol::encode_stream_complete(request_id)
 }
 
 /// Encode a stream-specific error (multiplexed protocol).
 ///
 /// This sends an error for a specific stream without affecting other streams.
 pub fn encode_stream_error(request_id: u32, error: &ProtocolError) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_stream_error(request_id, error)
+    crate::common::protocol::encode_stream_error(request_id, error)
 }
 
 /// Encode an error message using the new protocol.
 ///
 /// This is a convenience wrapper around `ProtocolError::encode()`.
 pub fn encode_error(error: &ProtocolError) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_error(error)
+    crate::common::protocol::encode_error(error)
 }
 
 /// Encode a simple error message from a string.
 ///
 /// Creates a non-retryable error with the given code and message.
 pub fn encode_simple_error(code: ErrorCode, message: &str) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_simple_error(code, message)
+    crate::common::protocol::encode_simple_error(code, message)
 }
 
 /// Encode a Ping message for keepalive.
@@ -151,7 +151,7 @@ pub fn encode_simple_error(code: ErrorCode, message: &str) -> Vec<u8> {
 /// The timestamp is typically the server's monotonic time in milliseconds,
 /// which the client echoes back in a Pong message.
 pub fn encode_ping(timestamp: u64) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_ping(timestamp)
+    crate::common::protocol::encode_ping(timestamp)
 }
 
 // ============================================================================
@@ -164,7 +164,7 @@ pub fn encode_ping(timestamp: u64) -> Vec<u8> {
 ///
 /// Format: `[version:u8][type:u8][request_id:u32][image_id_len:u16][image_id:utf8]`
 pub fn encode_image_set(request_id: u32, image_id: &str) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_image_set(request_id, image_id)
+    crate::common::protocol::encode_image_set(request_id, image_id)
 }
 
 /// Encode a ModelReady message (multiplexed protocol).
@@ -173,7 +173,7 @@ pub fn encode_image_set(request_id: u32, image_id: &str) -> Vec<u8> {
 ///
 /// Format: `[version:u8][type:u8][request_id:u32][model_id_len:u16][model_id:utf8]`
 pub fn encode_model_ready(request_id: u32, model_id: &str) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_model_ready(request_id, model_id)
+    crate::common::protocol::encode_model_ready(request_id, model_id)
 }
 
 /// Encode an InferProgress message (multiplexed protocol).
@@ -182,7 +182,7 @@ pub fn encode_model_ready(request_id: u32, model_id: &str) -> Vec<u8> {
 ///
 /// Format: `[version:u8][type:u8][request_id:u32][progress:u8][status_len:u16][status:utf8]`
 pub fn encode_infer_progress(request_id: u32, progress: u8, status: &str) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_infer_progress(request_id, progress, status)
+    crate::common::protocol::encode_infer_progress(request_id, progress, status)
 }
 
 /// Encode an InferResult message (multiplexed protocol).
@@ -191,7 +191,7 @@ pub fn encode_infer_progress(request_id: u32, progress: u8, status: &str) -> Vec
 ///
 /// Format: `[version:u8][type:u8][request_id:u32][json_payload:utf8]`
 pub fn encode_infer_result(request_id: u32, result_json: &str) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_infer_result(request_id, result_json)
+    crate::common::protocol::encode_infer_result(request_id, result_json)
 }
 
 /// Encode server capabilities as JSON (Protocol v2).
@@ -201,7 +201,7 @@ pub fn encode_infer_result(request_id: u32, result_json: &str) -> Vec<u8> {
 ///
 /// Format: `[version:u8][type:u8][request_id=0:u32][json_payload:utf8]`
 pub fn encode_capabilities_v2(capabilities: &hvat_common::ServerCapabilities) -> Vec<u8> {
-    hvat_backend_helper::protocol::encode_capabilities_v2(capabilities)
+    crate::common::protocol::encode_capabilities_v2(capabilities)
 }
 
 #[cfg(test)]

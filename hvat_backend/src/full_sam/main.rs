@@ -1,6 +1,6 @@
 //! HVAT Axum Server Entry Point
 //!
-//! Run with: `cargo run -p hvat_axum -- --data-dir /path/to/images`
+//! Run with: `cargo run -p hvat_backend --bin hvat_backend -- --data-dir /path/to/images`
 //!
 //! Use `--help` to see all options.
 
@@ -14,8 +14,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use hvat_axum::config::CliArgs;
-use hvat_axum::{AppState, ServerConfig, pregenerate_pyramids, routes};
+use hvat_backend::full_sam::config::CliArgs;
+use hvat_backend::full_sam::{AppState, ServerConfig, pregenerate_pyramids, routes};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "hvat_axum=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "hvat_backend::full_sam=debug,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();

@@ -1,11 +1,11 @@
 //! RGBA band packing for GPU-ready data.
 //!
-//! Re-exports shared packing and downsampling logic from `hvat_backend_helper`
+//! Re-exports shared packing and downsampling logic from `crate::shared`
 //! and provides the `BandPacker` trait for the pyramid builder.
 
 use crate::loaders::BandData;
 
-pub use hvat_backend_helper::packer::{
+pub use crate::common::packer::{
     BANDS_PER_LAYER, MIN_TEXTURE_LAYERS, downsample_bands, pack_bands_to_rgba_layers,
 };
 

@@ -4,7 +4,7 @@ use std::ops::Deref;
 use std::path::PathBuf;
 
 use clap::Parser;
-use hvat_backend_helper::config::{BaseCliArgs, ServerConfig as BaseServerConfig};
+use crate::common::config::{BaseCliArgs, ServerConfig as BaseServerConfig};
 
 use crate::sam::{ExecutionProvider, SamVariant};
 
@@ -172,7 +172,7 @@ impl ServerConfig {
                  The following SAM flags were set:\n  {}\n\n\
                  But --sam-enabled was not specified (defaults to false).\n\n\
                  To enable SAM, add --sam-enabled to your command:\n  \
-                 cargo run -p hvat_axum -- --sam-enabled {}\n\n",
+                 cargo run -p hvat_backend -- --sam-enabled {}\n\n",
                 issues.join("\n  "),
                 issues.join(" ")
             );

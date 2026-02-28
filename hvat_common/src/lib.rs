@@ -1,6 +1,6 @@
 //! Shared utilities for HVAT crates.
 //!
-//! This crate provides common functionality used across hvat_axum, hvat_leptos,
+//! This crate provides common functionality used across hvat_backend, hvat_leptos,
 //! and hvat_gpu to avoid code duplication and ensure consistent behavior.
 
 pub mod annotation_io;

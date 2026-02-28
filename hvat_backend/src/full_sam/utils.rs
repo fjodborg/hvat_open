@@ -1,8 +1,8 @@
-//! Shared utility functions for hvat_axum.
+//! Shared utility functions for hvat_backend.
 
 use std::path::PathBuf;
 
-use hvat_backend_helper::catalog::find_supported_image_by_id;
+use crate::common::catalog::find_supported_image_by_id;
 
 use crate::error::{Error, Result};
 use crate::state::AppState;
@@ -11,7 +11,7 @@ use crate::state::AppState;
 ///
 /// Preserves `-` and `_` characters.
 pub fn make_url_safe(s: &str) -> String {
-    hvat_backend_helper::catalog::make_url_safe(s)
+    crate::common::catalog::make_url_safe(s)
 }
 
 /// Find an image file by its URL-safe ID.

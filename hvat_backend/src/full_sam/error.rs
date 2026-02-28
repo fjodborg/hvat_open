@@ -36,19 +36,19 @@ pub enum Error {
     Internal(String),
 }
 
-impl From<hvat_backend_helper::error::Error> for Error {
-    fn from(value: hvat_backend_helper::error::Error) -> Self {
+impl From<crate::common::error::Error> for Error {
+    fn from(value: crate::common::error::Error) -> Self {
         match value {
-            hvat_backend_helper::error::Error::ImageNotFound(msg) => Self::ImageNotFound(msg),
-            hvat_backend_helper::error::Error::ProjectNotFound(msg) => Self::ProjectNotFound(msg),
-            hvat_backend_helper::error::Error::UnsupportedFormat(msg) => {
+            crate::common::error::Error::ImageNotFound(msg) => Self::ImageNotFound(msg),
+            crate::common::error::Error::ProjectNotFound(msg) => Self::ProjectNotFound(msg),
+            crate::common::error::Error::UnsupportedFormat(msg) => {
                 Self::UnsupportedFormat(msg)
             }
-            hvat_backend_helper::error::Error::InvalidImageData(msg) => Self::InvalidImageData(msg),
-            hvat_backend_helper::error::Error::PyramidNotReady(msg) => Self::PyramidNotReady(msg),
-            hvat_backend_helper::error::Error::Io(err) => Self::Io(err),
-            hvat_backend_helper::error::Error::Image(err) => Self::Image(err),
-            hvat_backend_helper::error::Error::Internal(msg) => Self::Internal(msg),
+            crate::common::error::Error::InvalidImageData(msg) => Self::InvalidImageData(msg),
+            crate::common::error::Error::PyramidNotReady(msg) => Self::PyramidNotReady(msg),
+            crate::common::error::Error::Io(err) => Self::Io(err),
+            crate::common::error::Error::Image(err) => Self::Image(err),
+            crate::common::error::Error::Internal(msg) => Self::Internal(msg),
         }
     }
 }

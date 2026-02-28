@@ -1,7 +1,4 @@
 //! Server info, image listing, and project-state endpoints.
-//!
-//! The server exposes a single "project" which is the configured data directory.
-//! Clients connecting to this server see it as one project.
 
 use std::{io::ErrorKind, sync::Arc};
 
@@ -13,18 +10,17 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use hvat_backend_helper::catalog::{ImageInfo, count_supported_images, list_supported_images};
-use hvat_backend_helper::project_state::{
+use crate::common::catalog::{ImageInfo, count_supported_images, list_supported_images};
+use crate::common::project_state::{
     MAX_PROJECT_STATE_BYTES, read_project_state, validate_project_state_payload,
     write_project_state,
 };
-use hvat_backend_helper::upload::save_uploaded_images;
+use crate::common::upload::save_uploaded_images;
 use serde::Serialize;
 
-use crate::Result;
-use crate::state::AppState;
+use crate::common::error::Result;
+use crate::simple::state::AppState;
 
-/// Server/project information.
 #[derive(Debug, Serialize)]
 pub struct ServerInfo {
     pub name: String,
@@ -38,7 +34,6 @@ struct UploadImagesResponse {
     files: Vec<String>,
 }
 
-/// Create the router for server info and images.
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/info", get(get_info))

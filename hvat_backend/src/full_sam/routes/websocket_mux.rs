@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use hvat_backend_helper::websocket::current_timestamp_ms;
+use crate::common::websocket::current_timestamp_ms;
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 

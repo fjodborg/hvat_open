@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
-use hvat_backend_helper::catalog::collect_supported_image_paths;
+use crate::common::catalog::collect_supported_image_paths;
 
 use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::state::AppState;

@@ -10,8 +10,8 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use hvat_axum::sam::{ExecutionProvider, SamVariant};
-use hvat_axum::{AppState, ServerConfig, routes};
+use hvat_backend::sam::{ExecutionProvider, SamVariant};
+use hvat_backend::{AppState, ServerConfig, routes};
 use hvat_common::annotation_io::{BundleFile, ExportBundle};
 use zip::ZipArchive;
 
@@ -79,7 +79,7 @@ async fn setup_test_server() -> Option<TestContext> {
         .expect("Failed to write nested image");
 
     let config = ServerConfig {
-        base: hvat_backend_helper::config::ServerConfig {
+        base: hvat_backend::common::config::ServerConfig {
             port: 0, // Let OS assign port
             data_dir: temp_dir.path().to_path_buf(),
             cache_dir: cache_dir.path().to_path_buf(),
@@ -428,7 +428,7 @@ async fn test_sam_enabled_but_models_missing_should_error() {
     // with a clear error message instead of silently disabling SAM.
 
     let config = ServerConfig {
-        base: hvat_backend_helper::config::ServerConfig {
+        base: hvat_backend::common::config::ServerConfig {
             port: 0,
             data_dir: std::path::PathBuf::from("../hvat_visual_tests/test_input"),
             cache_dir: std::path::PathBuf::from("./.cache/pyramids"),
@@ -464,7 +464,7 @@ async fn start_test_server_with_sam() -> Option<SocketAddr> {
     }
 
     let config = ServerConfig {
-        base: hvat_backend_helper::config::ServerConfig {
+        base: hvat_backend::common::config::ServerConfig {
             port: 0,
             data_dir: std::path::PathBuf::from("../hvat_visual_tests/test_input"),
             cache_dir: std::path::PathBuf::from("./.cache/pyramids"),
@@ -685,7 +685,7 @@ async fn test_progressive_streaming_sends_multiple_levels() {
     std::fs::write(&test_image_path, bytes).expect("Failed to write test image");
 
     let config = ServerConfig {
-        base: hvat_backend_helper::config::ServerConfig {
+        base: hvat_backend::common::config::ServerConfig {
             port: 0,
             data_dir: temp_dir.path().to_path_buf(),
             cache_dir: cache_dir.path().to_path_buf(),
