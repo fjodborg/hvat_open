@@ -1,6 +1,7 @@
 //! Application state shared across handlers.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,6 +13,21 @@ use crate::inference::{ModelRegistry, SamInferenceAdapter};
 use crate::loaders::ImageLoaderRegistry;
 use crate::pyramid::{FilesystemStorage, PyramidBuilder, PyramidStorage};
 use crate::sam::{EmbeddingCache, OnnxSamEngine, SamBackend};
+
+/// Errors that can occur when initializing application state.
+#[derive(Debug, thiserror::Error)]
+pub enum StateInitError {
+    #[error(
+        "SAM initialization failed: {source}. model directory: {model_dir}, expected files: {encoder_file}, {decoder_file}"
+    )]
+    SamInit {
+        #[source]
+        source: anyhow::Error,
+        model_dir: PathBuf,
+        encoder_file: &'static str,
+        decoder_file: &'static str,
+    },
+}
 
 /// Shared application state.
 pub struct AppState {
@@ -54,7 +70,7 @@ pub struct AppState {
 
 impl AppState {
     /// Create new application state.
-    pub fn new(config: ServerConfig) -> Self {
+    pub fn new(config: ServerConfig) -> std::result::Result<Self, StateInitError> {
         // Register image loaders
         let loaders = ImageLoaderRegistry::with_defaults();
 
@@ -80,26 +96,12 @@ impl AppState {
                     Some(Arc::new(engine))
                 }
                 Err(e) => {
-                    // User explicitly enabled SAM but initialization failed.
-                    // This is a configuration error - fail loudly!
-                    panic!(
-                        "\n\nERROR: SAM initialization failed!\n\n\
-                         You specified --sam-enabled but SAM could not be initialized:\n\
-                         {}\n\n\
-                         This is usually because the ONNX model files are missing.\n\
-                         Expected model directory: {}\n\
-                         Expected files:\n\
-                           - {}\n\
-                           - {}\n\n\
-                         To fix this, either:\n\
-                         1. Download the models manually from:\n\
-                            https://huggingface.co/vietanhdev/segment-anything-2-onnx-models\n\
-                         2. Remove --sam-enabled to run without SAM\n\n",
-                        e,
-                        config.sam_model_dir.display(),
-                        config.sam_variant.encoder_filename(),
-                        config.sam_variant.decoder_filename(),
-                    );
+                    return Err(StateInitError::SamInit {
+                        source: e,
+                        model_dir: config.sam_model_dir.clone(),
+                        encoder_file: config.sam_variant.encoder_filename(),
+                        decoder_file: config.sam_variant.decoder_filename(),
+                    });
                 }
             }
         } else {
@@ -123,7 +125,7 @@ impl AppState {
             None
         };
 
-        Self {
+        Ok(Self {
             config,
             loaders,
             pyramid_storage,
@@ -135,7 +137,7 @@ impl AppState {
             model_registry,
             active_connections: AtomicU64::new(0),
             connection_id_counter: AtomicU64::new(0),
-        }
+        })
     }
 
     /// Try to acquire a connection slot.

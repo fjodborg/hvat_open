@@ -37,6 +37,15 @@ struct NpyHeader {
     shape: Vec<usize>,
 }
 
+fn dim_to_u32(value: usize, axis: &str) -> Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        Error::InvalidImageData(format!(
+            "NPY {} dimension {} exceeds u32 range",
+            axis, value
+        ))
+    })
+}
+
 fn parse_npy_header(path: &Path) -> Result<NpyHeader> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -216,6 +225,8 @@ impl ImageLoader for NpyLoader {
             }
 
             let [num_bands, height, width] = [header.shape[0], header.shape[1], header.shape[2]];
+            let width = dim_to_u32(width, "width")?;
+            let height = dim_to_u32(height, "height")?;
 
             let filename = path
                 .file_name()
@@ -224,8 +235,8 @@ impl ImageLoader for NpyLoader {
                 .to_string();
 
             Ok(ImageMetadata {
-                width: width as u32,
-                height: height as u32,
+                width,
+                height,
                 num_bands,
                 filename,
                 format: "NPY".to_string(),
@@ -248,6 +259,8 @@ impl ImageLoader for NpyLoader {
             }
 
             let [_num_bands, height, width] = [header.shape[0], header.shape[1], header.shape[2]];
+            let width = dim_to_u32(width, "width")?;
+            let height = dim_to_u32(height, "height")?;
 
             let bands = read_npy_bands_typed(&path, header.dtype)?;
 
@@ -256,8 +269,8 @@ impl ImageLoader for NpyLoader {
             }
 
             Ok(BandData {
-                width: width as u32,
-                height: height as u32,
+                width,
+                height,
                 bands,
             })
         })

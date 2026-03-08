@@ -7,6 +7,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::{ErrorCode, ServerMessageType, Severity};
 
+const MAX_U16_BYTES: usize = u16::MAX as usize;
+
+fn truncate_utf8_to_u16(value: &str) -> &str {
+    if value.len() <= MAX_U16_BYTES {
+        return value;
+    }
+
+    let mut end = MAX_U16_BYTES;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 /// Full error information for protocol transmission.
 ///
 /// This structure contains all information needed to properly display
@@ -101,9 +115,17 @@ impl ProtocolError {
             ErrorContext::None => String::new(),
             ctx => serde_json::to_string(ctx).unwrap_or_default(),
         };
+        // Context is parsed as JSON on decode; if too large for u16 framing,
+        // drop it rather than truncating into invalid JSON.
+        let context_json = if context_json.len() <= MAX_U16_BYTES {
+            context_json
+        } else {
+            String::new()
+        };
+        let truncated_message = truncate_utf8_to_u16(&self.message);
 
         let context_bytes = context_json.as_bytes();
-        let message_bytes = self.message.as_bytes();
+        let message_bytes = truncated_message.as_bytes();
 
         let mut buf =
             Vec::with_capacity(2 + 1 + 1 + 4 + 2 + 2 + context_bytes.len() + message_bytes.len());

@@ -8,6 +8,20 @@ pub use hvat_common::protocol::{
 };
 pub use hvat_common::{ErrorContext, ProtocolError, ServerCapabilities};
 
+const MAX_U16_BYTES: usize = u16::MAX as usize;
+
+fn truncate_utf8_to_u16(value: &str) -> &str {
+    if value.len() <= MAX_U16_BYTES {
+        return value;
+    }
+
+    let mut end = MAX_U16_BYTES;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 /// Stream metadata sent at the start of streaming.
 #[derive(Debug, Clone)]
 pub struct StreamMetadata {
@@ -135,6 +149,7 @@ pub fn encode_ping(timestamp: u64) -> Vec<u8> {
 }
 
 pub fn encode_image_set(request_id: u32, image_id: &str) -> Vec<u8> {
+    let image_id = truncate_utf8_to_u16(image_id);
     let image_id_bytes = image_id.as_bytes();
     FrameBuilder::new()
         .with_header(
@@ -149,6 +164,7 @@ pub fn encode_image_set(request_id: u32, image_id: &str) -> Vec<u8> {
 }
 
 pub fn encode_model_ready(request_id: u32, model_id: &str) -> Vec<u8> {
+    let model_id = truncate_utf8_to_u16(model_id);
     let model_id_bytes = model_id.as_bytes();
     FrameBuilder::new()
         .with_header(
@@ -163,6 +179,7 @@ pub fn encode_model_ready(request_id: u32, model_id: &str) -> Vec<u8> {
 }
 
 pub fn encode_infer_progress(request_id: u32, progress: u8, status: &str) -> Vec<u8> {
+    let status = truncate_utf8_to_u16(status);
     let status_bytes = status.as_bytes();
     FrameBuilder::new()
         .with_header(
@@ -191,8 +208,7 @@ pub fn encode_infer_result(request_id: u32, result_json: &str) -> Vec<u8> {
 }
 
 pub fn encode_capabilities_v2(capabilities: &hvat_common::ServerCapabilities) -> Vec<u8> {
-    let json = serde_json::to_string(capabilities).unwrap();
-    let json_bytes = json.as_bytes();
+    let json_bytes = serde_json::to_vec(capabilities).unwrap_or_else(|_| b"{}".to_vec());
     FrameBuilder::new()
         .with_header(
             PROTOCOL_VERSION,
@@ -200,7 +216,7 @@ pub fn encode_capabilities_v2(capabilities: &hvat_common::ServerCapabilities) ->
             0,
         )
         .reserve_payload(json_bytes.len())
-        .extend_bytes(json_bytes)
+        .extend_bytes(&json_bytes)
         .finish()
 }
 

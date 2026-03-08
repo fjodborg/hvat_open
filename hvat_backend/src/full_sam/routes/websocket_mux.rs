@@ -2120,7 +2120,7 @@ mod tests {
 
     #[test]
     fn capabilities_without_models_disable_inference_and_sam() {
-        let state = AppState::new(ServerConfig::default());
+        let state = AppState::new(ServerConfig::default()).expect("state init should succeed");
         let caps = build_server_capabilities(&state);
 
         assert!(caps.features.streaming);

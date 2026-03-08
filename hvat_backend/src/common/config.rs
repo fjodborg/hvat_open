@@ -1,7 +1,7 @@
 use std::ops::Deref;
 use std::path::PathBuf;
 
-use clap::{Args, Parser};
+use clap::{Args, Parser, value_parser};
 
 /// Shared base CLI arguments used by backend implementations.
 #[derive(Args, Debug, Clone)]
@@ -39,7 +39,12 @@ pub struct BaseCliArgs {
     pub connection_timeout: u64,
 
     /// Number of rows to send per WebSocket message.
-    #[arg(long, default_value = "128", env = "HVAT_CHUNK_ROWS")]
+    #[arg(
+        long,
+        default_value = "128",
+        env = "HVAT_CHUNK_ROWS",
+        value_parser = value_parser!(u32).range(1..)
+    )]
     pub chunk_rows: u32,
 
     /// Project name (display name for this server/data directory).
@@ -141,7 +146,8 @@ impl ServerConfig {
             max_connections: args.max_connections,
             ping_interval_secs: args.ping_interval,
             connection_timeout_secs: args.connection_timeout,
-            stream_chunk_rows: args.chunk_rows,
+            // Defensive clamp: CLI parser already enforces this, but keep config robust.
+            stream_chunk_rows: args.chunk_rows.max(1),
             project_name,
         }
     }

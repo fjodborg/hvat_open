@@ -50,6 +50,19 @@ pub struct CliArgs {
     pub sam_cache_size: usize,
 }
 
+/// Configuration parsing and validation errors.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("SAM-specific flags require --sam-enabled: {0}")]
+    SamFlagsWithoutEnable(String),
+
+    #[error("Invalid SAM variant '{value}': {reason}")]
+    InvalidSamVariant { value: String, reason: String },
+
+    #[error("Invalid SAM execution provider '{value}': {reason}")]
+    InvalidSamProvider { value: String, reason: String },
+}
+
 /// Server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -105,26 +118,37 @@ impl Default for ServerConfig {
 
 impl ServerConfig {
     /// Create configuration from CLI arguments.
-    ///
-    /// # Panics
-    ///
-    /// Panics if SAM-specific flags are used without `--sam-enabled`.
-    pub fn from_cli(args: CliArgs) -> Self {
-        Self::validate_sam_flags(&args);
+    pub fn from_cli(args: CliArgs) -> std::result::Result<Self, ConfigError> {
+        Self::validate_sam_flags(&args)?;
 
         let base = BaseServerConfig::from_base_cli(args.base);
 
-        let sam_variant = args.sam_variant.parse().unwrap_or_default();
+        let sam_variant =
+            args.sam_variant
+                .parse()
+                .map_err(|e: crate::sam::models::ParseSamVariantError| {
+                    ConfigError::InvalidSamVariant {
+                        value: args.sam_variant.clone(),
+                        reason: e.to_string(),
+                    }
+                })?;
         let sam_provider = if args.sam_provider == "auto" {
             crate::sam::engine::detect_best_provider()
         } else {
-            args.sam_provider.parse().unwrap_or_default()
+            args.sam_provider.parse().map_err(
+                |e: crate::sam::backend::ParseExecutionProviderError| {
+                    ConfigError::InvalidSamProvider {
+                        value: args.sam_provider.clone(),
+                        reason: e.to_string(),
+                    }
+                },
+            )?
         };
         let sam_model_dir = args
             .sam_model_dir
             .unwrap_or_else(crate::sam::models::default_model_dir);
 
-        Self {
+        Ok(Self {
             base,
             max_user_memory: args.max_user_mb * 1024 * 1024,
             pyramid_concurrency: args.pyramid_concurrency.max(1),
@@ -133,15 +157,13 @@ impl ServerConfig {
             sam_variant,
             sam_provider,
             sam_cache_size: args.sam_cache_size,
-        }
+        })
     }
 
     /// Validate SAM-related CLI flags.
-    ///
-    /// Panics if SAM-specific flags are used without `--sam-enabled`.
-    fn validate_sam_flags(args: &CliArgs) {
+    fn validate_sam_flags(args: &CliArgs) -> std::result::Result<(), ConfigError> {
         if args.sam_enabled {
-            return;
+            return Ok(());
         }
 
         let has_custom_variant = args.sam_variant != "tiny";
@@ -166,21 +188,18 @@ impl ServerConfig {
             issues.push(format!("--sam-cache-size={}", args.sam_cache_size));
         }
 
-        if !issues.is_empty() {
-            panic!(
-                "\n\nERROR: SAM flags specified without --sam-enabled!\n\n\
-                 The following SAM flags were set:\n  {}\n\n\
-                 But --sam-enabled was not specified (defaults to false).\n\n\
-                 To enable SAM, add --sam-enabled to your command:\n  \
-                 cargo run -p hvat_backend -- --sam-enabled {}\n\n",
-                issues.join("\n  "),
-                issues.join(" ")
-            );
+        if issues.is_empty() {
+            return Ok(());
         }
+
+        Err(ConfigError::SamFlagsWithoutEnable(format!(
+            "set flags [{}], but SAM is disabled",
+            issues.join(", ")
+        )))
     }
 
     /// Load configuration from environment variables.
-    pub fn from_env() -> Self {
-        Self::from_cli(CliArgs::parse())
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_cli(CliArgs::parse()).map_err(Into::into)
     }
 }

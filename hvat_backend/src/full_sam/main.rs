@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let args = CliArgs::parse();
 
     // Load configuration from CLI
-    let config = ServerConfig::from_cli(args);
+    let config = ServerConfig::from_cli(args)?;
     tracing::info!("Starting HVAT server with config: {:?}", config);
     tracing::info!(
         "Project: {} ({})",
@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create application state
-    let state = Arc::new(AppState::new(config.clone()));
+    let state = Arc::new(AppState::new(config.clone())?);
 
     // Pre-generate pyramids/thumbnails in background so startup is non-blocking.
     let pregen_state = state.clone();
