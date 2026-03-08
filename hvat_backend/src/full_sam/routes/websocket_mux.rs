@@ -27,9 +27,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::common::websocket::current_timestamp_ms;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use crate::common::websocket::current_timestamp_ms;
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 
@@ -2068,8 +2068,10 @@ fn build_server_capabilities(state: &AppState) -> ServerCapabilities {
             streaming: true,
             project_state: true,
             downloads: true,
+            thumbnails: true,
             inference: inference_enabled,
             sam: false,
+            progressive_streaming: true,
         },
         download_mode: DownloadMode::Chunked,
         models,

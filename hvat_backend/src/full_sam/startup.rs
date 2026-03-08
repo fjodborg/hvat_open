@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use futures::stream::{self, StreamExt};
 use crate::common::catalog::collect_supported_image_paths;
+use futures::stream::{self, StreamExt};
 
 use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::state::AppState;

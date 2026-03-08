@@ -3,8 +3,8 @@
 use std::ops::Deref;
 use std::path::PathBuf;
 
-use clap::Parser;
 use crate::common::config::{BaseCliArgs, ServerConfig as BaseServerConfig};
+use clap::Parser;
 
 use crate::sam::{ExecutionProvider, SamVariant};
 

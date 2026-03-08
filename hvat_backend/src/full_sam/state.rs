@@ -167,6 +167,20 @@ impl AppState {
     }
 }
 
+impl crate::helper::http::projects::ProjectRoutesState for AppState {
+    fn project_name(&self) -> &str {
+        &self.config.project_name
+    }
+
+    fn data_dir(&self) -> &std::path::Path {
+        &self.config.data_dir
+    }
+
+    fn loaders(&self) -> &ImageLoaderRegistry {
+        &self.loaders
+    }
+}
+
 /// Per-user session state for resource management.
 #[derive(Debug)]
 pub struct SessionState {

@@ -41,9 +41,7 @@ impl From<crate::common::error::Error> for Error {
         match value {
             crate::common::error::Error::ImageNotFound(msg) => Self::ImageNotFound(msg),
             crate::common::error::Error::ProjectNotFound(msg) => Self::ProjectNotFound(msg),
-            crate::common::error::Error::UnsupportedFormat(msg) => {
-                Self::UnsupportedFormat(msg)
-            }
+            crate::common::error::Error::UnsupportedFormat(msg) => Self::UnsupportedFormat(msg),
             crate::common::error::Error::InvalidImageData(msg) => Self::InvalidImageData(msg),
             crate::common::error::Error::PyramidNotReady(msg) => Self::PyramidNotReady(msg),
             crate::common::error::Error::Io(err) => Self::Io(err),

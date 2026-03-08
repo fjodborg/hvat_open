@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use crate::common::archive::{ArchiveError, build_project_archive};
+use crate::common::catalog::find_supported_image_by_id;
 use axum::{
     Json, Router,
     body::Body,
@@ -10,12 +12,10 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use crate::common::archive::{ArchiveError, build_project_archive};
-use crate::common::catalog::find_supported_image_by_id;
 use serde::Serialize;
 
-use crate::simple::state::AppState;
 use crate::common::error::{Error, Result};
+use crate::simple::state::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct ImageMetadataResponse {

@@ -522,6 +522,24 @@ impl ServerCapabilities {
         matches!(self.download_mode, DownloadMode::Chunked)
     }
 
+    /// Whether the backend supports progressive multi-level streaming.
+    ///
+    /// Backwards compatibility:
+    /// - If `features.progressive_streaming` is set, that is authoritative.
+    /// - Otherwise, inference-capable backends are treated as progressive-capable.
+    pub fn supports_progressive_streaming(&self) -> bool {
+        self.features.progressive_streaming || self.supports_inference()
+    }
+
+    /// Whether the backend supports HTTP thumbnail previews.
+    ///
+    /// Backwards compatibility:
+    /// - Prefer explicit `features.thumbnails` when present.
+    /// - Otherwise treat download-capable servers as thumbnail-capable.
+    pub fn supports_thumbnails(&self) -> bool {
+        self.features.thumbnails || self.features.downloads || self.supports_chunked_downloads()
+    }
+
     /// Check if client version is compatible with server.
     pub fn is_compatible(&self, client_version: u8) -> bool {
         // For now, require exact match. In the future, we might allow
@@ -542,12 +560,18 @@ pub struct ServerFeatures {
     /// Supports HTTP image download endpoints.
     #[serde(default)]
     pub downloads: bool,
+    /// Supports HTTP thumbnail preview endpoints.
+    #[serde(default)]
+    pub thumbnails: bool,
     /// Supports model inference over `/api/ws`.
     #[serde(default)]
     pub inference: bool,
     /// Supports SAM-style interactive segmentation.
     #[serde(default)]
     pub sam: bool,
+    /// Supports server-side progressive multi-level streaming.
+    #[serde(default)]
+    pub progressive_streaming: bool,
 }
 
 /// Download transport mode announced by the backend.
@@ -768,8 +792,10 @@ mod tests {
                 streaming: true,
                 project_state: true,
                 downloads: true,
+                thumbnails: true,
                 inference: true,
                 sam: false,
+                progressive_streaming: true,
             },
             download_mode: DownloadMode::Chunked,
             models: vec![ModelCapability {
@@ -841,8 +867,10 @@ mod tests {
                 "streaming": true,
                 "project_state": true,
                 "downloads": true,
+                "thumbnails": true,
                 "inference": false,
-                "sam": false
+                "sam": false,
+                "progressive_streaming": false
             },
             "models": []
         });
@@ -850,6 +878,23 @@ mod tests {
         let decoded: ServerCapabilities = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.download_mode, DownloadMode::Unknown);
         assert!(!decoded.supports_chunked_downloads());
+    }
+
+    #[test]
+    fn test_supports_thumbnails_prefers_features_and_legacy_downloads() {
+        let mut caps = ServerCapabilities::default();
+        assert!(!caps.supports_thumbnails());
+
+        caps.features.downloads = true;
+        assert!(caps.supports_thumbnails());
+
+        caps.features.downloads = false;
+        caps.download_mode = DownloadMode::Chunked;
+        assert!(caps.supports_thumbnails());
+
+        caps.download_mode = DownloadMode::SingleZip;
+        caps.features.thumbnails = true;
+        assert!(caps.supports_thumbnails());
     }
 
     #[test]

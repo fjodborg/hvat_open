@@ -7,6 +7,7 @@
 
 pub mod common;
 pub mod full_sam;
+pub mod helper;
 pub mod simple;
 
 // Keep root-level exports for existing call sites.

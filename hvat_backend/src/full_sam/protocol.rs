@@ -241,8 +241,10 @@ mod tests {
                 streaming: true,
                 project_state: true,
                 downloads: true,
+                thumbnails: true,
                 inference: true,
                 sam: true,
+                progressive_streaming: true,
             },
             download_mode: DownloadMode::Chunked,
             models: vec![ModelCapability {

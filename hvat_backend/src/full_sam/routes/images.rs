@@ -2,6 +2,10 @@
 
 use std::sync::Arc;
 
+use crate::common::archive::{
+    ArchiveError, DownloadPartInfo, DownloadPlanResponse, DownloadQuery,
+    build_chunked_download_plan, build_images_zip, build_project_archive, resolve_part_size_bytes,
+};
 use axum::{
     Json, Router,
     body::Body,
@@ -9,10 +13,6 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::get,
-};
-use crate::common::archive::{
-    ArchiveError, DownloadPartInfo, DownloadPlanResponse, DownloadQuery,
-    build_chunked_download_plan, build_images_zip, build_project_archive, resolve_part_size_bytes,
 };
 use hvat_common::pixel_count_u32;
 use serde::Serialize;
@@ -154,87 +154,38 @@ async fn get_thumbnail(
         )
     })?;
 
+    const THUMBNAIL_MAX_DIM: u32 = 256;
+
     let status = state.pyramid_storage.get_status(&image_hash).await;
-    if status != PyramidStatus::Ready {
-        return Err((StatusCode::NOT_FOUND, "Thumbnail not ready".to_string()));
-    }
-
-    let metadata = state
-        .pyramid_storage
-        .load_metadata(&image_hash)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Metadata error: {}", e),
-            )
-        })?;
-
-    let level_info = metadata.levels.last().ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "No pyramid levels".to_string(),
+    let png_data = if status == PyramidStatus::Ready {
+        match load_pyramid_thumbnail_png(&state, &image_hash).await {
+            Ok(png) => png,
+            Err(err) => {
+                log::warn!(
+                    "Failed to read pyramid thumbnail for '{}': {}. Falling back to on-demand thumbnail generation.",
+                    image_id,
+                    err
+                );
+                crate::common::streaming::generate_thumbnail(
+                    &state.config.data_dir,
+                    &state.loaders,
+                    &image_id,
+                    THUMBNAIL_MAX_DIM,
+                )
+                .await
+                .map_err(|e| (StatusCode::NOT_FOUND, format!("Thumbnail failed: {e}")))?
+            }
+        }
+    } else {
+        crate::common::streaming::generate_thumbnail(
+            &state.config.data_dir,
+            &state.loaders,
+            &image_id,
+            THUMBNAIL_MAX_DIM,
         )
-    })?;
-
-    let layers = state
-        .pyramid_storage
-        .load_level(&image_hash, level_info.level)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Level load error: {}", e),
-            )
-        })?;
-
-    if layers.is_empty() {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "No layer data".to_string(),
-        ));
-    }
-
-    let (_, rgba_data) = &layers[0];
-
-    let width = level_info.width;
-    let height = level_info.height;
-    let expected_size = pixel_count_u32(width, height)
-        .checked_mul(4)
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Thumbnail dimensions too large: {}x{}", width, height),
-            )
-        })?;
-
-    if rgba_data.len() != expected_size {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "Data size mismatch: got {} expected {}",
-                rgba_data.len(),
-                expected_size
-            ),
-        ));
-    }
-
-    let img = image::RgbaImage::from_raw(width, height, rgba_data.clone()).ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to create image from RGBA data".to_string(),
-        )
-    })?;
-
-    let mut png_data = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut png_data);
-    img.write_to(&mut cursor, image::ImageFormat::Png)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("PNG encode error: {}", e),
-            )
-        })?;
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("Thumbnail failed: {e}")))?
+    };
 
     Ok((
         StatusCode::OK,
@@ -244,6 +195,57 @@ async fn get_thumbnail(
         ],
         Body::from(png_data),
     ))
+}
+
+async fn load_pyramid_thumbnail_png(
+    state: &AppState,
+    image_hash: &str,
+) -> std::result::Result<Vec<u8>, String> {
+    let metadata = state
+        .pyramid_storage
+        .load_metadata(image_hash)
+        .await
+        .map_err(|e| format!("Metadata error: {}", e))?;
+
+    let level_info = metadata
+        .levels
+        .last()
+        .ok_or_else(|| "No pyramid levels".to_string())?;
+
+    let layers = state
+        .pyramid_storage
+        .load_level(image_hash, level_info.level)
+        .await
+        .map_err(|e| format!("Level load error: {}", e))?;
+
+    if layers.is_empty() {
+        return Err("No layer data".to_string());
+    }
+
+    let (_, rgba_data) = &layers[0];
+    let width = level_info.width;
+    let height = level_info.height;
+    let expected_size = pixel_count_u32(width, height)
+        .checked_mul(4)
+        .ok_or_else(|| format!("Thumbnail dimensions too large: {}x{}", width, height))?;
+
+    if rgba_data.len() != expected_size {
+        return Err(format!(
+            "Data size mismatch: got {} expected {}",
+            rgba_data.len(),
+            expected_size
+        ));
+    }
+
+    let img = image::RgbaImage::from_raw(width, height, rgba_data.clone())
+        .ok_or_else(|| "Failed to create image from RGBA data".to_string())?;
+
+    let mut png_data = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut png_data);
+    img.write_to(&mut cursor, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG encode error: {}", e))?;
+
+    Ok(png_data)
 }
 
 /// Download the original image bytes.
