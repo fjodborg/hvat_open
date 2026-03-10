@@ -155,9 +155,7 @@ pub fn build_images_zip(entries: &[ImageEntry]) -> Result<Vec<u8>, String> {
         .unix_permissions(0o644);
 
     for entry in entries {
-        let options = base_options
-            .clone()
-            .large_file(requires_zip64(entry.size_bytes));
+        let options = base_options.large_file(requires_zip64(entry.size_bytes));
         zip.start_file(&entry.relative_path, options)
             .map_err(|e| format!("Failed to add '{}' to zip: {}", entry.relative_path, e))?;
 

@@ -180,12 +180,12 @@ where
     }
 
     // Fast path for new stable IDs.
-    if let Some(relative_path) = decode_relative_path_from_image_id(image_id) {
-        if is_safe_relative_path(&relative_path) {
-            let candidate = data_dir.join(&relative_path);
-            if candidate.is_file() && is_supported(&candidate) {
-                return Some(candidate);
-            }
+    if let Some(relative_path) = decode_relative_path_from_image_id(image_id)
+        && is_safe_relative_path(&relative_path)
+    {
+        let candidate = data_dir.join(&relative_path);
+        if candidate.is_file() && is_supported(&candidate) {
+            return Some(candidate);
         }
     }
 

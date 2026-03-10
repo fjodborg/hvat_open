@@ -108,6 +108,7 @@ pub fn split_upload_segments(
 /// - `files` (one or more file fields)
 ///
 /// The `is_supported` callback is used to validate file extensions/types.
+#[allow(clippy::too_many_lines)]
 pub async fn save_uploaded_images<F>(
     data_dir: &Path,
     mut multipart: Multipart,

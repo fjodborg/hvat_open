@@ -1252,6 +1252,7 @@ fn make_progress_callback(
 // ---------------------------------------------------------------------------
 
 /// Handle prepare_model request.
+#[allow(clippy::cognitive_complexity)]
 async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) {
     let PrepareModelRequest {
         request_id,
@@ -1338,6 +1339,7 @@ async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) 
 }
 
 /// Handle infer request.
+#[allow(clippy::cognitive_complexity)]
 async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
     let InferModelRequest {
         request_id,

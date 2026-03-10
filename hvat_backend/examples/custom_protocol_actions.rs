@@ -236,14 +236,13 @@ async fn handle_custom_ws(socket: WebSocket, state: Arc<AppState>) {
                     }),
                 };
 
-                if let Ok(text_payload) = response {
-                    if sender
+                if let Ok(text_payload) = response
+                    && sender
                         .send(Message::Text(text_payload.into()))
                         .await
                         .is_err()
-                    {
-                        break;
-                    }
+                {
+                    break;
                 }
             }
             Message::Close(_) => break,

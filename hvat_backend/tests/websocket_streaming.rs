@@ -329,7 +329,7 @@ async fn test_rest_api_images_download_part() {
     let archive =
         ZipArchive::new(Cursor::new(bytes.to_vec())).expect("Failed to parse zip archive");
     assert!(
-        archive.len() >= 1,
+        !archive.is_empty(),
         "Part archive should contain at least one image"
     );
 }
@@ -665,6 +665,7 @@ async fn test_sam_segment_e2e_with_real_models() {
 /// TODO: Rewrite this test to use the mux protocol (/api/ws with set_image + stream_image)
 #[tokio::test]
 #[ignore = "Needs rewrite for mux protocol - uses removed per-image endpoint"]
+#[allow(clippy::too_many_lines)]
 async fn test_progressive_streaming_sends_multiple_levels() {
     // Create a larger test image that will have multiple pyramid levels
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -1044,6 +1045,7 @@ async fn test_mux_websocket_sends_capabilities_on_connect() {
 
 /// Test that the multiplexed endpoint can stream an image using Protocol v2 (set_image + stream_image).
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn test_mux_websocket_streams_image() {
     let Some(ctx) = setup_test_server().await else {
         return;

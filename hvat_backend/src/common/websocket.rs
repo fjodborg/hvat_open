@@ -176,6 +176,7 @@ struct MuxCtx<H: BackendHandler> {
 ///     handle_websocket(socket, handler, ws_state)
 /// })
 /// ```
+#[allow(clippy::cognitive_complexity)]
 pub async fn handle_websocket<H: BackendHandler>(
     socket: WebSocket,
     handler: Arc<H>,
@@ -226,6 +227,7 @@ pub async fn handle_websocket<H: BackendHandler>(
     }
 }
 
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 async fn handle_inner<H: BackendHandler>(
     socket: WebSocket,
     handler: Arc<H>,
@@ -375,6 +377,7 @@ async fn handle_inner<H: BackendHandler>(
     Ok(())
 }
 
+#[allow(clippy::cognitive_complexity)]
 async fn handle_message<H: BackendHandler>(msg: ClientMessage, ctx: MuxCtx<H>) {
     match msg {
         ClientMessage::SetImage {

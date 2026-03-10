@@ -321,8 +321,10 @@ mod tests {
 
     #[test]
     fn custom_wiring_registers_custom_model_id() {
-        let mut config = ServerConfig::default();
-        config.sam_enabled = true;
+        let config = ServerConfig {
+            sam_enabled: true,
+            ..ServerConfig::default()
+        };
 
         let state = AppState::new_with_sam_wiring(
             config,
@@ -342,8 +344,10 @@ mod tests {
 
     #[test]
     fn custom_wiring_surfaces_backend_context_on_init_failure() {
-        let mut config = ServerConfig::default();
-        config.sam_enabled = true;
+        let config = ServerConfig {
+            sam_enabled: true,
+            ..ServerConfig::default()
+        };
 
         let result = AppState::new_with_sam_wiring(
             config,
