@@ -18,15 +18,64 @@ use crate::sam::{EmbeddingCache, OnnxSamEngine, SamBackend};
 #[derive(Debug, thiserror::Error)]
 pub enum StateInitError {
     #[error(
-        "SAM initialization failed: {source}. model directory: {model_dir}, expected files: {encoder_file}, {decoder_file}"
+        "SAM backend '{backend_name}' initialization failed: {source}. model directory: {model_dir}, expected files: {expected_files}"
     )]
     SamInit {
         #[source]
         source: anyhow::Error,
+        backend_name: &'static str,
         model_dir: PathBuf,
-        encoder_file: &'static str,
-        decoder_file: &'static str,
+        expected_files: String,
     },
+}
+
+type SamBackendFactoryFn = fn(&ServerConfig) -> anyhow::Result<Arc<dyn SamBackend>>;
+type SamModelNameFn = fn(&ServerConfig) -> String;
+type SamExpectedFilesFn = fn(&ServerConfig) -> Vec<String>;
+
+/// Describes how SAM should be wired into the inference registry.
+///
+/// Keeping this explicit allows sibling backends (for example SAM2 and SAM3)
+/// to share state plumbing while owning their model registration details.
+#[derive(Clone, Copy)]
+pub struct SamBackendWiring {
+    pub backend_name: &'static str,
+    pub model_id: &'static str,
+    pub model_name: SamModelNameFn,
+    pub expected_files: SamExpectedFilesFn,
+    pub create_backend: SamBackendFactoryFn,
+}
+
+impl SamBackendWiring {
+    pub fn sam2_default() -> Self {
+        Self {
+            backend_name: "sam2-onnx",
+            model_id: "sam-base",
+            model_name: sam2_model_name,
+            expected_files: sam2_expected_files,
+            create_backend: create_sam2_backend,
+        }
+    }
+}
+
+fn sam2_model_name(config: &ServerConfig) -> String {
+    format!("Segment Anything ({})", config.sam_variant.name())
+}
+
+fn sam2_expected_files(config: &ServerConfig) -> Vec<String> {
+    vec![
+        config.sam_variant.encoder_filename().to_string(),
+        config.sam_variant.decoder_filename().to_string(),
+    ]
+}
+
+fn create_sam2_backend(config: &ServerConfig) -> anyhow::Result<Arc<dyn SamBackend>> {
+    let engine = OnnxSamEngine::new(
+        &config.sam_model_dir,
+        config.sam_variant,
+        config.sam_provider,
+    )?;
+    Ok(Arc::new(engine))
 }
 
 /// Shared application state.
@@ -52,12 +101,6 @@ pub struct AppState {
     /// Tasks are removed when they complete (success or failure).
     pub pyramid_tasks: RwLock<HashMap<String, JoinHandle<()>>>,
 
-    /// SAM engine for AI-assisted segmentation (None if SAM is disabled)
-    pub sam_engine: Option<Arc<dyn SamBackend>>,
-
-    /// Cache for SAM image embeddings
-    pub embedding_cache: Arc<EmbeddingCache>,
-
     /// Model registry for inference backends (Protocol v2)
     pub model_registry: Option<Arc<ModelRegistry>>,
 
@@ -71,6 +114,14 @@ pub struct AppState {
 impl AppState {
     /// Create new application state.
     pub fn new(config: ServerConfig) -> std::result::Result<Self, StateInitError> {
+        Self::new_with_sam_wiring(config, SamBackendWiring::sam2_default())
+    }
+
+    /// Create application state with explicit SAM backend wiring.
+    pub fn new_with_sam_wiring(
+        config: ServerConfig,
+        sam_wiring: SamBackendWiring,
+    ) -> std::result::Result<Self, StateInitError> {
         // Register image loaders
         let loaders = ImageLoaderRegistry::with_defaults();
 
@@ -81,47 +132,45 @@ impl AppState {
         // Create pyramid builder
         let pyramid_builder = PyramidBuilder::new(pyramid_storage.clone());
 
-        // Create embedding cache
-        let embedding_cache = Arc::new(EmbeddingCache::new(config.sam_cache_size));
-
-        // Create SAM engine if enabled
-        let sam_engine: Option<Arc<dyn SamBackend>> = if config.sam_enabled {
-            match OnnxSamEngine::new(
-                &config.sam_model_dir,
-                config.sam_variant,
-                config.sam_provider,
-            ) {
+        // Create model registry and register SAM if enabled.
+        let model_registry = if config.sam_enabled {
+            let sam_backend = match (sam_wiring.create_backend)(&config) {
                 Ok(engine) => {
-                    log::info!("SAM engine initialized successfully");
-                    Some(Arc::new(engine))
+                    log::info!(
+                        "SAM engine '{}' initialized successfully",
+                        sam_wiring.backend_name
+                    );
+                    engine
                 }
                 Err(e) => {
+                    let expected_files = (sam_wiring.expected_files)(&config);
+                    let expected_files = if expected_files.is_empty() {
+                        "<unspecified>".to_string()
+                    } else {
+                        expected_files.join(", ")
+                    };
                     return Err(StateInitError::SamInit {
                         source: e,
+                        backend_name: sam_wiring.backend_name,
                         model_dir: config.sam_model_dir.clone(),
-                        encoder_file: config.sam_variant.encoder_filename(),
-                        decoder_file: config.sam_variant.decoder_filename(),
+                        expected_files,
                     });
                 }
-            }
-        } else {
-            log::info!("SAM is disabled in configuration");
-            None
-        };
+            };
 
-        // Create model registry and register SAM if enabled
-        let model_registry = if let Some(ref sam_backend) = sam_engine {
+            let embedding_cache = Arc::new(EmbeddingCache::new(config.sam_cache_size));
             let mut registry = ModelRegistry::new();
             let adapter = SamInferenceAdapter::new(
-                sam_backend.clone(),
-                embedding_cache.clone(),
-                "sam-base",
-                format!("Segment Anything ({})", config.sam_variant.name()),
+                sam_backend,
+                embedding_cache,
+                sam_wiring.model_id,
+                (sam_wiring.model_name)(&config),
             );
             registry.register(adapter);
             log::info!("Registered SAM model in inference registry");
             Some(Arc::new(registry))
         } else {
+            log::info!("SAM is disabled in configuration");
             None
         };
 
@@ -132,8 +181,6 @@ impl AppState {
             pyramid_builder,
             sessions: RwLock::new(HashMap::new()),
             pyramid_tasks: RwLock::new(HashMap::new()),
-            sam_engine,
-            embedding_cache,
             model_registry,
             active_connections: AtomicU64::new(0),
             connection_id_counter: AtomicU64::new(0),
@@ -208,6 +255,118 @@ impl SessionState {
             active_streams: 0,
             memory_used: 0,
             last_activity: std::time::Instant::now(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    use crate::sam::{EncoderOutput, ExecutionProvider, SamMaskResult, SamPoint};
+
+    struct MockSamBackend;
+
+    #[async_trait]
+    impl SamBackend for MockSamBackend {
+        fn name(&self) -> &'static str {
+            "mock-sam"
+        }
+
+        fn provider(&self) -> ExecutionProvider {
+            ExecutionProvider::Cpu
+        }
+
+        async fn encode_image(
+            &self,
+            _image_rgb: &[u8],
+            _width: u32,
+            _height: u32,
+        ) -> anyhow::Result<EncoderOutput> {
+            anyhow::bail!("unused in test")
+        }
+
+        async fn decode_mask(
+            &self,
+            _encoder_output: &EncoderOutput,
+            _original_width: u32,
+            _original_height: u32,
+            _points: &[SamPoint],
+            _box_prompt: Option<[f32; 4]>,
+        ) -> anyhow::Result<SamMaskResult> {
+            anyhow::bail!("unused in test")
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    fn mock_model_name(_: &ServerConfig) -> String {
+        "Mock SAM".to_string()
+    }
+
+    fn mock_expected_files(_: &ServerConfig) -> Vec<String> {
+        vec!["encoder.onnx".to_string(), "decoder.onnx".to_string()]
+    }
+
+    fn mock_factory(_: &ServerConfig) -> anyhow::Result<Arc<dyn SamBackend>> {
+        Ok(Arc::new(MockSamBackend))
+    }
+
+    fn failing_factory(_: &ServerConfig) -> anyhow::Result<Arc<dyn SamBackend>> {
+        anyhow::bail!("boom")
+    }
+
+    #[test]
+    fn custom_wiring_registers_custom_model_id() {
+        let mut config = ServerConfig::default();
+        config.sam_enabled = true;
+
+        let state = AppState::new_with_sam_wiring(
+            config,
+            SamBackendWiring {
+                backend_name: "mock-backend",
+                model_id: "sam-custom",
+                model_name: mock_model_name,
+                expected_files: mock_expected_files,
+                create_backend: mock_factory,
+            },
+        )
+        .expect("state init should succeed");
+
+        let registry = state.model_registry.expect("model registry should exist");
+        assert!(registry.get("sam-custom").is_some());
+    }
+
+    #[test]
+    fn custom_wiring_surfaces_backend_context_on_init_failure() {
+        let mut config = ServerConfig::default();
+        config.sam_enabled = true;
+
+        let result = AppState::new_with_sam_wiring(
+            config,
+            SamBackendWiring {
+                backend_name: "failing-backend",
+                model_id: "sam-custom",
+                model_name: mock_model_name,
+                expected_files: mock_expected_files,
+                create_backend: failing_factory,
+            },
+        );
+        let err = result.err().expect("state init should fail");
+
+        match err {
+            StateInitError::SamInit {
+                backend_name,
+                expected_files,
+                ..
+            } => {
+                assert_eq!(backend_name, "failing-backend");
+                assert!(expected_files.contains("encoder.onnx"));
+                assert!(expected_files.contains("decoder.onnx"));
+            }
         }
     }
 }

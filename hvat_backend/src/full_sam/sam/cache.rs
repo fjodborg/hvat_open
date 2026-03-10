@@ -43,7 +43,7 @@ impl EmbeddingCache {
     /// # Arguments
     /// * `max_entries` - Maximum number of embeddings to cache (must be > 0)
     pub fn new(max_entries: usize) -> Self {
-        let size = NonZeroUsize::new(max_entries.max(1)).unwrap();
+        let size = NonZeroUsize::new(max_entries).unwrap_or(NonZeroUsize::MIN);
         Self {
             cache: RwLock::new(LruCache::new(size)),
             max_entries,

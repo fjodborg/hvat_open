@@ -168,7 +168,6 @@ impl ServerConfig {
 
         let has_custom_variant = args.sam_variant != "tiny";
         let has_custom_provider = args.sam_provider != "auto";
-        let has_custom_model_dir = args.sam_model_dir.is_some();
         let has_custom_cache_size = args.sam_cache_size != 50;
 
         let mut issues = Vec::new();
@@ -178,11 +177,8 @@ impl ServerConfig {
         if has_custom_provider {
             issues.push(format!("--sam-provider={}", args.sam_provider));
         }
-        if has_custom_model_dir {
-            issues.push(format!(
-                "--sam-model-dir={}",
-                args.sam_model_dir.as_ref().unwrap().display()
-            ));
+        if let Some(model_dir) = args.sam_model_dir.as_ref() {
+            issues.push(format!("--sam-model-dir={}", model_dir.display()));
         }
         if has_custom_cache_size {
             issues.push(format!("--sam-cache-size={}", args.sam_cache_size));

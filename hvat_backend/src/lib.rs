@@ -4,9 +4,11 @@
 //! - `common`: shared helper functionality
 //! - `simple`: minimal backend mode (no SAM/pyramid caching)
 //! - `full_sam`: full backend mode with pyramids and SAM inference
+//! - `full_sam3`: SAM3 backend entrypoint scaffold
 
 pub mod common;
 pub mod full_sam;
+pub mod full_sam3;
 pub mod helper;
 pub mod simple;
 

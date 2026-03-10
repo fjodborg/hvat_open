@@ -100,7 +100,9 @@ async fn setup_test_server() -> Option<TestContext> {
         sam_cache_size: 10,
     };
 
-    let state = Arc::new(AppState::new(config));
+    let state = Arc::new(
+        AppState::new(config).expect("test server state should initialize for progressive test"),
+    );
 
     let cors = tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
@@ -422,7 +424,7 @@ async fn test_project_state_rejects_invalid_payload() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "SAM initialization failed")]
+#[should_panic(expected = "initialization failed")]
 async fn test_sam_enabled_but_models_missing_should_error() {
     // When sam_enabled=true but models don't exist, the server should panic
     // with a clear error message instead of silently disabling SAM.
@@ -450,7 +452,7 @@ async fn test_sam_enabled_but_models_missing_should_error() {
     };
 
     // This should panic with a clear error about missing models
-    Arc::new(AppState::new(config));
+    Arc::new(AppState::new(config).expect("SAM initialization failed"));
 }
 
 /// Start a test server with SAM enabled (requires models in .cache/models).
@@ -485,12 +487,14 @@ async fn start_test_server_with_sam() -> Option<SocketAddr> {
         sam_cache_size: 10,
     };
 
-    let state = Arc::new(AppState::new(config));
+    let state = Arc::new(
+        AppState::new(config).expect("test server state should initialize for progressive test"),
+    );
 
-    // Verify SAM engine is available
+    // Verify SAM model registry is available.
     assert!(
-        state.sam_engine.is_some(),
-        "SAM engine should be initialized"
+        state.model_registry.is_some(),
+        "SAM model registry should be initialized"
     );
     println!("SAM engine initialized successfully");
 
@@ -706,7 +710,9 @@ async fn test_progressive_streaming_sends_multiple_levels() {
         sam_cache_size: 10,
     };
 
-    let state = Arc::new(AppState::new(config));
+    let state = Arc::new(
+        AppState::new(config).expect("test server state should initialize for progressive test"),
+    );
 
     let cors = tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::Any)

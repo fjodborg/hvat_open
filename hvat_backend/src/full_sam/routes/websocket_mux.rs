@@ -1433,14 +1433,27 @@ async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
                 "outputs": result.outputs,
                 "timing_ms": result.timing_ms,
             });
-            let json_str = serde_json::to_string(&result_json).unwrap();
-            let msg = encode_infer_result(request_id, &json_str);
-            ctx.tx.send(Message::Binary(msg.into())).await.ok();
-            tracing::debug!(
-                "Mux connection {}: inference complete ({}ms)",
-                ctx.connection_id,
-                result.timing_ms
-            );
+            match serde_json::to_string(&result_json) {
+                Ok(json_str) => {
+                    let msg = encode_infer_result(request_id, &json_str);
+                    ctx.tx.send(Message::Binary(msg.into())).await.ok();
+                    tracing::debug!(
+                        "Mux connection {}: inference complete ({}ms)",
+                        ctx.connection_id,
+                        result.timing_ms
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to encode inference result payload: {}", e);
+                    send_error(
+                        &ctx.tx,
+                        request_id,
+                        ErrorCode::ModelDecodeFailed,
+                        format!("Failed to encode inference result: {}", e),
+                    )
+                    .await;
+                }
+            }
         }
         Err(e) => {
             tracing::error!("Inference failed: {}", e);

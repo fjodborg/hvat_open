@@ -15,6 +15,10 @@ path = "src/full_sam/main.rs"
 name = "simple"
 path = "src/simple/main.rs"
 
+[[bin]]
+name = "hvat_backend_sam3"
+path = "src/full_sam3/main.rs"
+
 [features]
 default = []
 sam-cuda = ["ort/cuda"]
