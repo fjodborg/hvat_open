@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod routes;
+pub mod sam;
 pub mod startup;
 pub mod state;
 
