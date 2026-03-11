@@ -408,34 +408,10 @@ impl ConnectionStreams {
 ///
 /// This is the entry point for the `/api/ws` endpoint. It manages multiple
 /// concurrent image streams over a single WebSocket connection.
-#[allow(clippy::cognitive_complexity)]
 pub async fn handle_websocket_mux(socket: WebSocket, state: Arc<AppState>) {
-    // Try to acquire a connection slot
-    let connection_id = match state.try_acquire_connection() {
-        Some(id) => id,
-        None => {
-            // At connection limit - reject with error
-            let (mut sender, _) = socket.split();
-            let error = ProtocolError::retryable(
-                ErrorCode::MaxConnectionsReached,
-                format!(
-                    "Server at maximum connections ({}). Please try again later.",
-                    state.config.max_connections
-                ),
-                5000,
-            );
-            // If sending the error fails, client is likely already disconnected - nothing to do
-            sender
-                .send(Message::Binary(encode_stream_error(0, &error).into()))
-                .await
-                .ok();
-            sender.close().await.ok();
-            tracing::warn!(
-                "Rejected multiplexed connection: max connections ({}) reached",
-                state.config.max_connections
-            );
-            return;
-        }
+    let Some(connection_id) = state.try_acquire_connection() else {
+        reject_max_mux_connections(socket, state.config.max_connections).await;
+        return;
     };
 
     tracing::info!(
@@ -464,184 +440,280 @@ pub async fn handle_websocket_mux(socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-/// Inner handler for the multiplexed WebSocket connection.
-#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
+async fn reject_max_mux_connections(socket: WebSocket, max_connections: usize) {
+    let (mut sender, _) = socket.split();
+    let error = ProtocolError::retryable(
+        ErrorCode::MaxConnectionsReached,
+        format!(
+            "Server at maximum connections ({}). Please try again later.",
+            max_connections
+        ),
+        5000,
+    );
+    sender
+        .send(Message::Binary(encode_stream_error(0, &error).into()))
+        .await
+        .ok();
+    sender.close().await.ok();
+    tracing::warn!(
+        "Rejected multiplexed connection: max connections ({}) reached",
+        max_connections
+    );
+}
+
 async fn handle_websocket_mux_inner(
     socket: WebSocket,
     state: Arc<AppState>,
     connection_id: u64,
 ) -> Result<(), Error> {
-    let (mut sender, mut receiver) = socket.split();
-
-    // Channel for sending messages to the client (shared by all streams)
-    let (tx, mut rx) = mpsc::channel::<Message>(64);
-
-    // Shared state
+    let (sender, mut receiver) = socket.split();
+    let (tx, rx) = mpsc::channel::<Message>(64);
     let last_pong = Arc::new(AtomicU64::new(current_timestamp_ms()));
     let connection_alive = Arc::new(AtomicBool::new(true));
     let streams = Arc::new(RwLock::new(ConnectionStreams::new(
         state.config.max_user_streams as u32,
         MAX_CONCURRENT_INFERENCES,
     )));
-
-    // Build and send server capabilities immediately
     let capabilities = build_server_capabilities(&state);
-    let capabilities_bytes = encode_capabilities_v2(&capabilities);
+    let send_task = spawn_mux_send_task(
+        sender,
+        rx,
+        encode_capabilities_v2(&capabilities),
+        connection_alive.clone(),
+    );
+    let ping_task = spawn_mux_ping_task(
+        tx.clone(),
+        last_pong.clone(),
+        connection_alive.clone(),
+        state.config.ping_interval_secs,
+        state.config.connection_timeout_secs,
+        connection_id,
+    );
 
-    // Spawn task to forward messages to WebSocket
-    let connection_alive_send = connection_alive.clone();
-    let send_task = tokio::spawn(async move {
-        // Send capabilities as first message
+    let ctx = MuxRequestCtx {
+        state,
+        streams: streams.clone(),
+        tx: tx.clone(),
+        connection_id,
+    };
+    receive_mux_loop(&mut receiver, connection_alive.clone(), last_pong, ctx).await;
+
+    shutdown_mux_connection(connection_alive, streams, tx, send_task, ping_task).await;
+
+    Ok(())
+}
+
+fn spawn_mux_send_task(
+    mut sender: futures::stream::SplitSink<WebSocket, Message>,
+    mut rx: mpsc::Receiver<Message>,
+    capabilities_bytes: Vec<u8>,
+    connection_alive: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
         if sender
             .send(Message::Binary(capabilities_bytes.into()))
             .await
             .is_err()
         {
-            connection_alive_send.store(false, Ordering::SeqCst);
+            connection_alive.store(false, Ordering::SeqCst);
             return;
         }
 
-        // Forward all messages from streams
         while let Some(msg) = rx.recv().await {
             if sender.send(msg).await.is_err() {
-                connection_alive_send.store(false, Ordering::SeqCst);
+                connection_alive.store(false, Ordering::SeqCst);
                 break;
             }
         }
-    });
+    })
+}
 
-    // Spawn ping task if keepalive is enabled
-    let ping_interval = state.config.ping_interval_secs;
-    let connection_timeout = state.config.connection_timeout_secs;
-    let ping_task = if ping_interval > 0 {
-        let tx_ping = tx.clone();
-        let last_pong_ping = last_pong.clone();
-        let connection_alive_ping = connection_alive.clone();
+fn spawn_mux_ping_task(
+    tx: mpsc::Sender<Message>,
+    last_pong: Arc<AtomicU64>,
+    connection_alive: Arc<AtomicBool>,
+    ping_interval_secs: u64,
+    connection_timeout_secs: u64,
+    connection_id: u64,
+) -> Option<JoinHandle<()>> {
+    if ping_interval_secs == 0 {
+        return None;
+    }
 
-        Some(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(ping_interval));
-            interval.tick().await; // Skip immediate first tick
+    Some(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(ping_interval_secs));
+        interval.tick().await;
 
-            loop {
-                interval.tick().await;
+        loop {
+            interval.tick().await;
 
-                if !connection_alive_ping.load(Ordering::SeqCst) {
-                    break;
-                }
-
-                // Check if client has timed out
-                let last_pong_time = last_pong_ping.load(Ordering::SeqCst);
-                let now = current_timestamp_ms();
-                let elapsed_secs = (now.saturating_sub(last_pong_time)) / 1000;
-
-                if elapsed_secs > connection_timeout {
-                    tracing::warn!(
-                        "Multiplexed connection {} timed out: no pong for {} seconds",
-                        connection_id,
-                        elapsed_secs
-                    );
-                    connection_alive_ping.store(false, Ordering::SeqCst);
-                    break;
-                }
-
-                // Send ping (request_id = 0 for connection-level)
-                let ping_msg = encode_ping(now);
-                if tx_ping
-                    .send(Message::Binary(ping_msg.into()))
-                    .await
-                    .is_err()
-                {
-                    connection_alive_ping.store(false, Ordering::SeqCst);
-                    break;
-                }
-
-                tracing::trace!("Sent ping to multiplexed connection {}", connection_id);
+            if !connection_alive.load(Ordering::SeqCst) {
+                break;
             }
-        }))
-    } else {
-        None
-    };
 
-    // Process incoming messages
+            if mux_pong_timeout_exceeded(&last_pong, connection_timeout_secs) {
+                tracing::warn!(
+                    "Multiplexed connection {} timed out: no pong for {} seconds",
+                    connection_id,
+                    mux_elapsed_pong_seconds(&last_pong)
+                );
+                connection_alive.store(false, Ordering::SeqCst);
+                break;
+            }
+
+            let ping_msg = encode_ping(current_timestamp_ms());
+            if tx.send(Message::Binary(ping_msg.into())).await.is_err() {
+                connection_alive.store(false, Ordering::SeqCst);
+                break;
+            }
+
+            tracing::trace!("Sent ping to multiplexed connection {}", connection_id);
+        }
+    }))
+}
+
+fn mux_elapsed_pong_seconds(last_pong: &AtomicU64) -> u64 {
+    let last_pong_time = last_pong.load(Ordering::SeqCst);
+    let now = current_timestamp_ms();
+    (now.saturating_sub(last_pong_time)) / 1000
+}
+
+fn mux_pong_timeout_exceeded(last_pong: &AtomicU64, timeout_secs: u64) -> bool {
+    mux_elapsed_pong_seconds(last_pong) > timeout_secs
+}
+
+async fn receive_mux_loop(
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    connection_alive: Arc<AtomicBool>,
+    last_pong: Arc<AtomicU64>,
+    ctx: MuxRequestCtx,
+) {
     while let Some(result) = receiver.next().await {
         if !connection_alive.load(Ordering::SeqCst) {
             break;
         }
 
-        match result {
-            Ok(msg) => match msg {
-                Message::Text(text) => {
-                    tracing::debug!("Mux received: {}", text);
-
-                    match serde_json::from_str::<ClientMessage>(&text) {
-                        Ok(client_msg) => {
-                            // Handle Pong specially
-                            if let ClientMessage::Pong { timestamp } = &client_msg {
-                                last_pong.store(current_timestamp_ms(), Ordering::SeqCst);
-                                tracing::trace!(
-                                    "Received pong from mux connection {} (ts: {})",
-                                    connection_id,
-                                    timestamp
-                                );
-                                continue;
-                            }
-
-                            handle_mux_message(
-                                client_msg,
-                                state.clone(),
-                                streams.clone(),
-                                tx.clone(),
-                                connection_id,
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Invalid client message on mux connection: {}", e);
-                            let error = ProtocolError::error(
-                                ErrorCode::InvalidRequest,
-                                format!("Invalid message: {}", e),
-                            );
-                            // Ignore send errors - client likely disconnected
-                            tx.send(Message::Binary(encode_stream_error(0, &error).into()))
-                                .await
-                                .ok();
-                        }
-                    }
-                }
-                Message::Close(_) => {
-                    tracing::debug!("Received close frame on mux connection {}", connection_id);
-                    break;
-                }
-                _ => {} // Ignore binary messages from client
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "WebSocket receive error on mux connection {}: {}",
-                    connection_id,
-                    e
-                );
-                break;
-            }
+        let keep_running = handle_mux_socket_event(
+            result,
+            connection_alive.clone(),
+            last_pong.clone(),
+            ctx.clone(),
+        )
+        .await;
+        if !keep_running {
+            break;
         }
     }
+}
 
-    // Signal shutdown
+async fn handle_mux_socket_event(
+    result: Result<Message, axum::Error>,
+    connection_alive: Arc<AtomicBool>,
+    last_pong: Arc<AtomicU64>,
+    ctx: MuxRequestCtx,
+) -> bool {
+    match result {
+        Ok(msg) => handle_mux_socket_message(msg, last_pong, ctx).await,
+        Err(e) => {
+            tracing::warn!(
+                "WebSocket receive error on mux connection {}: {}",
+                ctx.connection_id,
+                e
+            );
+            connection_alive.store(false, Ordering::SeqCst);
+            false
+        }
+    }
+}
+
+async fn handle_mux_socket_message(
+    msg: Message,
+    last_pong: Arc<AtomicU64>,
+    ctx: MuxRequestCtx,
+) -> bool {
+    match msg {
+        Message::Text(text) => {
+            tracing::debug!("Mux received: {}", text);
+            handle_mux_text_message(&text, last_pong, ctx).await;
+            true
+        }
+        Message::Close(frame) => {
+            tracing::debug!(
+                "Received close frame on mux connection {}",
+                ctx.connection_id
+            );
+            // Mirror the close frame so the peer can complete a clean WebSocket shutdown.
+            if ctx.tx.send(Message::Close(frame)).await.is_err() {
+                tracing::debug!(
+                    "Failed to forward close frame on mux connection {}",
+                    ctx.connection_id
+                );
+            }
+            false
+        }
+        _ => true,
+    }
+}
+
+async fn handle_mux_text_message(text: &str, last_pong: Arc<AtomicU64>, ctx: MuxRequestCtx) {
+    let client_msg = match serde_json::from_str::<ClientMessage>(text) {
+        Ok(message) => message,
+        Err(e) => {
+            tracing::warn!("Invalid client message on mux connection: {}", e);
+            let error =
+                ProtocolError::error(ErrorCode::InvalidRequest, format!("Invalid message: {}", e));
+            ctx.tx
+                .send(Message::Binary(encode_stream_error(0, &error).into()))
+                .await
+                .ok();
+            return;
+        }
+    };
+
+    if let ClientMessage::Pong { timestamp } = &client_msg {
+        last_pong.store(current_timestamp_ms(), Ordering::SeqCst);
+        tracing::trace!(
+            "Received pong from mux connection {} (ts: {})",
+            ctx.connection_id,
+            timestamp
+        );
+        return;
+    }
+
+    handle_mux_message(
+        client_msg,
+        ctx.state.clone(),
+        ctx.streams.clone(),
+        ctx.tx.clone(),
+        ctx.connection_id,
+    )
+    .await;
+}
+
+async fn shutdown_mux_connection(
+    connection_alive: Arc<AtomicBool>,
+    streams: Arc<RwLock<ConnectionStreams>>,
+    tx: mpsc::Sender<Message>,
+    send_task: JoinHandle<()>,
+    ping_task: Option<JoinHandle<()>>,
+) {
     connection_alive.store(false, Ordering::SeqCst);
 
-    // Cancel all active streams and inferences
+    // The ping task owns a sender clone; abort it first so channel shutdown is not
+    // delayed until the next ping interval tick.
+    if let Some(ping_task) = ping_task {
+        ping_task.abort();
+        let _ = ping_task.await;
+    }
+
     let mut streams_guard = streams.write().await;
     streams_guard.cancel_all();
     streams_guard.cancel_all_prepares();
     streams_guard.cancel_all_inferences();
+    drop(streams_guard);
 
-    // Clean up
     drop(tx);
-    send_task.await.ok();
-    if let Some(ping_task) = ping_task {
-        ping_task.abort();
-    }
-
-    Ok(())
+    let _ = send_task.await;
 }
 
 /// Handle a parsed client message on the multiplexed connection.
@@ -1252,7 +1324,6 @@ fn make_progress_callback(
 // ---------------------------------------------------------------------------
 
 /// Handle prepare_model request.
-#[allow(clippy::cognitive_complexity)]
 async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) {
     let PrepareModelRequest {
         request_id,
@@ -1269,22 +1340,54 @@ async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) 
         request_id
     );
 
-    let backend = match resolve_model_backend(&ctx.state, &model_id, request_id, &ctx.tx).await {
-        Some(b) => b,
-        None => return,
+    let Some(resolved) =
+        resolve_prepare_request(&ctx, request_id, &model_id, image_id, config.as_ref()).await
+    else {
+        return;
     };
-    let image_id = match resolve_image_id(&ctx.streams, image_id, request_id, &ctx.tx).await {
-        Some(id) => id,
-        None => return,
+
+    let image_context = crate::inference::ImageContext {
+        image_id: resolved.bands.embedding_key.clone(),
+        rgb_data: resolved.loaded.rgb_data,
+        width: resolved.loaded.width,
+        height: resolved.loaded.height,
     };
-    let bands =
-        match resolve_band_selection(&ctx.state, &image_id, config.as_ref(), request_id, &ctx.tx)
-            .await
-        {
-            Some(b) => b,
-            None => return,
-        };
-    let loaded = match load_image_for_inference(
+
+    let prepare_result = resolved
+        .backend
+        .prepare(&image_context, make_progress_callback(&ctx.tx, request_id))
+        .await;
+    on_prepare_complete(
+        &ctx,
+        prepare_result,
+        request_id,
+        &model_id,
+        &resolved.image_id,
+        resolved.bands.embedding_key,
+        resolved.loaded.width,
+        resolved.loaded.height,
+    )
+    .await;
+}
+
+struct PrepareRequestResolved {
+    backend: Arc<dyn InferenceBackend>,
+    image_id: String,
+    bands: ResolvedBands,
+    loaded: LoadedImage,
+}
+
+async fn resolve_prepare_request(
+    ctx: &MuxRequestCtx,
+    request_id: u32,
+    model_id: &str,
+    image_id: Option<String>,
+    config: Option<&serde_json::Value>,
+) -> Option<PrepareRequestResolved> {
+    let backend = resolve_model_backend(&ctx.state, model_id, request_id, &ctx.tx).await?;
+    let image_id = resolve_image_id(&ctx.streams, image_id, request_id, &ctx.tx).await?;
+    let bands = resolve_band_selection(&ctx.state, &image_id, config, request_id, &ctx.tx).await?;
+    let loaded = load_image_for_inference(
         &ctx.state,
         &ctx.streams,
         &image_id,
@@ -1293,30 +1396,33 @@ async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) 
         request_id,
         &ctx.tx,
     )
-    .await
-    {
-        Some(l) => l,
-        None => return,
-    };
+    .await?;
 
-    let image_context = crate::inference::ImageContext {
-        image_id: bands.embedding_key.clone(),
-        rgb_data: loaded.rgb_data,
-        width: loaded.width,
-        height: loaded.height,
-    };
+    Some(PrepareRequestResolved {
+        backend,
+        image_id,
+        bands,
+        loaded,
+    })
+}
 
-    match backend
-        .prepare(&image_context, make_progress_callback(&ctx.tx, request_id))
-        .await
-    {
+async fn on_prepare_complete(
+    ctx: &MuxRequestCtx,
+    result: anyhow::Result<()>,
+    request_id: u32,
+    model_id: &str,
+    image_id: &str,
+    embedding_key: String,
+    width: u32,
+    height: u32,
+) {
+    match result {
         Ok(()) => {
-            ctx.streams.write().await.cache_prepared_dimensions(
-                bands.embedding_key,
-                loaded.width,
-                loaded.height,
-            );
-            let msg = encode_model_ready(request_id, &model_id);
+            ctx.streams
+                .write()
+                .await
+                .cache_prepared_dimensions(embedding_key, width, height);
+            let msg = encode_model_ready(request_id, model_id);
             ctx.tx.send(Message::Binary(msg.into())).await.ok();
             tracing::info!(
                 "Mux connection {}: model {} ready for '{}'",
@@ -1339,7 +1445,6 @@ async fn handle_prepare_model(ctx: MuxRequestCtx, request: PrepareModelRequest) 
 }
 
 /// Handle infer request.
-#[allow(clippy::cognitive_complexity)]
 async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
     let InferModelRequest {
         request_id,
@@ -1356,61 +1461,64 @@ async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
         request_id
     );
 
-    let backend = match resolve_model_backend(&ctx.state, &model_id, request_id, &ctx.tx).await {
-        Some(b) => b,
-        None => return,
+    let Some(resolved) =
+        resolve_infer_request(&ctx, request_id, &model_id, image_id, inputs, options).await
+    else {
+        return;
     };
 
-    if let Err(e) = backend.validate_inputs(&inputs) {
-        send_error(
-            &ctx.tx,
-            request_id,
-            ErrorCode::InvalidInput,
-            format!("Invalid inputs: {}", e),
+    let infer_result = resolved
+        .backend
+        .infer(
+            &resolved.image_context,
+            resolved.inputs,
+            resolved.options,
+            make_progress_callback(&ctx.tx, request_id),
         )
         .await;
-        return;
-    }
+    handle_infer_result(&ctx, request_id, infer_result).await;
+}
 
-    let image_id = match resolve_image_id(&ctx.streams, image_id, request_id, &ctx.tx).await {
-        Some(id) => id,
-        None => return,
-    };
+struct InferRequestResolved {
+    backend: Arc<dyn InferenceBackend>,
+    image_context: crate::inference::ImageContext,
+    inputs: serde_json::Value,
+    options: serde_json::Value,
+}
 
-    // Resolve bands — for infer, band config comes from `options`.
+async fn resolve_infer_request(
+    ctx: &MuxRequestCtx,
+    request_id: u32,
+    model_id: &str,
+    image_id: Option<String>,
+    inputs: serde_json::Value,
+    options: serde_json::Value,
+) -> Option<InferRequestResolved> {
+    let backend = resolve_model_backend(&ctx.state, model_id, request_id, &ctx.tx).await?;
+    validate_infer_inputs(&ctx.tx, request_id, backend.as_ref(), &inputs).await?;
+
+    let image_id = resolve_image_id(&ctx.streams, image_id, request_id, &ctx.tx).await?;
     let mut bands =
-        match resolve_band_selection(&ctx.state, &image_id, Some(&options), request_id, &ctx.tx)
-            .await
-        {
-            Some(b) => b,
-            None => return,
-        };
-
-    if !ensure_embedding_ready(&ctx, backend.as_ref(), &image_id, &mut bands, request_id).await {
-        return;
+        resolve_band_selection(&ctx.state, &image_id, Some(&options), request_id, &ctx.tx).await?;
+    if !ensure_embedding_ready(ctx, backend.as_ref(), &image_id, &mut bands, request_id).await {
+        return None;
     }
 
-    let dimensions_only = backend.requires_embedding();
-    let loaded = match load_image_for_inference(
+    let loaded = load_image_for_inference(
         &ctx.state,
         &ctx.streams,
         &image_id,
         &bands,
-        dimensions_only,
+        backend.requires_embedding(),
         request_id,
         &ctx.tx,
     )
-    .await
-    {
-        Some(l) => l,
-        None => return,
-    };
+    .await?;
 
-    // For non-embedding backends, cache_key is the plain image_id.
     let cache_key = if backend.requires_embedding() {
         loaded.cache_key
     } else {
-        image_id.clone()
+        image_id
     };
 
     let image_context = crate::inference::ImageContext {
@@ -1419,42 +1527,46 @@ async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
         width: loaded.width,
         height: loaded.height,
     };
+    Some(InferRequestResolved {
+        backend,
+        image_context,
+        inputs,
+        options,
+    })
+}
 
-    match backend
-        .infer(
-            &image_context,
-            inputs,
-            options,
-            make_progress_callback(&ctx.tx, request_id),
+async fn validate_infer_inputs(
+    tx: &mpsc::Sender<Message>,
+    request_id: u32,
+    backend: &dyn InferenceBackend,
+    inputs: &serde_json::Value,
+) -> Option<()> {
+    if let Err(e) = backend.validate_inputs(inputs) {
+        send_error(
+            tx,
+            request_id,
+            ErrorCode::InvalidInput,
+            format!("Invalid inputs: {}", e),
         )
-        .await
-    {
+        .await;
+        return None;
+    }
+    Some(())
+}
+
+async fn handle_infer_result(
+    ctx: &MuxRequestCtx,
+    request_id: u32,
+    result: anyhow::Result<crate::inference::InferenceResult>,
+) {
+    match result {
         Ok(result) => {
-            let result_json = serde_json::json!({
-                "model_id": result.model_id,
-                "outputs": result.outputs,
-                "timing_ms": result.timing_ms,
-            });
-            match serde_json::to_string(&result_json) {
-                Ok(json_str) => {
-                    let msg = encode_infer_result(request_id, &json_str);
-                    ctx.tx.send(Message::Binary(msg.into())).await.ok();
-                    tracing::debug!(
-                        "Mux connection {}: inference complete ({}ms)",
-                        ctx.connection_id,
-                        result.timing_ms
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("Failed to encode inference result payload: {}", e);
-                    send_error(
-                        &ctx.tx,
-                        request_id,
-                        ErrorCode::ModelDecodeFailed,
-                        format!("Failed to encode inference result: {}", e),
-                    )
-                    .await;
-                }
+            if send_infer_payload(ctx, request_id, &result).await {
+                tracing::debug!(
+                    "Mux connection {}: inference complete ({}ms)",
+                    ctx.connection_id,
+                    result.timing_ms
+                );
             }
         }
         Err(e) => {
@@ -1468,6 +1580,36 @@ async fn handle_infer(ctx: MuxRequestCtx, request: InferModelRequest) {
             .await;
         }
     }
+}
+
+async fn send_infer_payload(
+    ctx: &MuxRequestCtx,
+    request_id: u32,
+    result: &crate::inference::InferenceResult,
+) -> bool {
+    let result_json = serde_json::json!({
+        "model_id": result.model_id,
+        "outputs": result.outputs,
+        "timing_ms": result.timing_ms,
+    });
+    let json_str = match serde_json::to_string(&result_json) {
+        Ok(payload) => payload,
+        Err(e) => {
+            tracing::error!("Failed to encode inference result payload: {}", e);
+            send_error(
+                &ctx.tx,
+                request_id,
+                ErrorCode::ModelDecodeFailed,
+                format!("Failed to encode inference result: {}", e),
+            )
+            .await;
+            return false;
+        }
+    };
+
+    let msg = encode_infer_result(request_id, &json_str);
+    ctx.tx.send(Message::Binary(msg.into())).await.ok();
+    true
 }
 
 /// Spawn a tracked pyramid build task.
@@ -2100,6 +2242,7 @@ mod tests {
     use super::*;
     use crate::config::ServerConfig;
     use crate::state::AppState;
+    use std::time::Duration;
 
     #[test]
     fn prepared_dimensions_eviction_is_lru_by_access() {
@@ -2147,5 +2290,31 @@ mod tests {
         assert!(caps.models.is_empty());
         assert!(!caps.supports_inference());
         assert!(!caps.supports_sam());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_aborts_ping_before_waiting_for_sender_task() {
+        let connection_alive = Arc::new(AtomicBool::new(true));
+        let streams = Arc::new(RwLock::new(ConnectionStreams::new(4, 2)));
+        let (tx, mut rx) = mpsc::channel::<Message>(8);
+
+        let send_task = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let ping_task = {
+            let ping_tx = tx.clone();
+            Some(tokio::spawn(async move {
+                // Hold a sender clone until aborted to mimic a sleeping ping loop.
+                let _held_sender = ping_tx;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }))
+        };
+
+        let shutdown = shutdown_mux_connection(connection_alive, streams, tx, send_task, ping_task);
+        let result = tokio::time::timeout(Duration::from_millis(200), shutdown).await;
+
+        assert!(
+            result.is_ok(),
+            "shutdown must not block waiting for ping interval before closing sender task"
+        );
     }
 }
