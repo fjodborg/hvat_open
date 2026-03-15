@@ -2,8 +2,7 @@ use super::*;
 
 #[test]
 fn test_error_encoding() {
-    let error =
-        ProtocolError::retryable(ErrorCode::PyramidNotReady, "Pyramid is building", 5000);
+    let error = ProtocolError::retryable(ErrorCode::PyramidNotReady, "Pyramid is building", 5000);
 
     let encoded = encode_error(&error);
     assert_eq!(encoded[0], PROTOCOL_VERSION);

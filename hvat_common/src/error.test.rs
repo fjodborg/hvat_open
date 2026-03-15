@@ -3,13 +3,12 @@ use crate::protocol::PROTOCOL_VERSION;
 
 #[test]
 fn test_error_encode_decode_roundtrip() {
-    let error =
-        ProtocolError::retryable(ErrorCode::PyramidNotReady, "Pyramid is building", 5000)
-            .with_context(ErrorContext::Pyramid {
-                image_id: "test.png".to_string(),
-                progress: Some(0.5),
-                eta_seconds: Some(10),
-            });
+    let error = ProtocolError::retryable(ErrorCode::PyramidNotReady, "Pyramid is building", 5000)
+        .with_context(ErrorContext::Pyramid {
+            image_id: "test.png".to_string(),
+            progress: Some(0.5),
+            eta_seconds: Some(10),
+        });
 
     let encoded = error.encode(PROTOCOL_VERSION);
     let decoded = ProtocolError::decode(&encoded[2..]).unwrap();

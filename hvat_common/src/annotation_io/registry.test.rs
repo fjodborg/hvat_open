@@ -79,11 +79,7 @@ fn assert_geometry_close(expected: &Geometry, actual: &Geometry) {
     }
 }
 
-fn assert_round_trip(
-    registry: &FormatRegistry,
-    format_id: FormatId,
-    dataset: AnnotationDataset,
-) {
+fn assert_round_trip(registry: &FormatRegistry, format_id: FormatId, dataset: AnnotationDataset) {
     let bundle = registry
         .export(format_id, &dataset, &ExportOptions::default())
         .expect("export should succeed");

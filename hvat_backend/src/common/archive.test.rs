@@ -35,8 +35,7 @@ fn build_images_zip_writes_expected_entry_contents() {
     }];
 
     let zip_bytes = build_images_zip(&entries).expect("build zip");
-    let mut archive =
-        zip::ZipArchive::new(Cursor::new(zip_bytes)).expect("open generated archive");
+    let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).expect("open generated archive");
     let mut zipped = archive
         .by_name("nested/source.bin")
         .expect("zip entry exists");

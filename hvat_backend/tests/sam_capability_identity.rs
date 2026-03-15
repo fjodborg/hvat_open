@@ -14,7 +14,7 @@ use hvat_backend::full_sam::sam::{
     EncoderOutput, ExecutionProvider, SamBackend, SamMaskResult, SamPoint,
 };
 use hvat_backend::full_sam::state::{AppState, SamBackendWiring};
-use hvat_backend::full_sam3::ServerConfig;
+use hvat_backend::ServerConfig;
 use hvat_backend::full_sam3::routes as sam3_routes;
 use hvat_common::{PROTOCOL_VERSION, ServerCapabilities, ServerMessageType};
 

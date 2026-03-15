@@ -1,6 +1,6 @@
 use super::{
-    decode_relative_path_from_image_id, encode_image_id_from_relative,
-    find_supported_image_by_id, list_supported_images, make_url_safe,
+    decode_relative_path_from_image_id, encode_image_id_from_relative, find_supported_image_by_id,
+    list_supported_images, make_url_safe,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};

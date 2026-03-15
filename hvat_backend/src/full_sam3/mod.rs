@@ -10,6 +10,6 @@ pub mod startup;
 pub mod state;
 
 pub use crate::full_sam::error::{Error, Result};
-pub use config::{CliArgs, ServerConfig};
+pub use config::{CliArgs, ConfigError, Sam3RuntimeKind, ServerConfig};
 pub use startup::pregenerate_pyramids;
 pub use state::{AppState, build_app_state};
