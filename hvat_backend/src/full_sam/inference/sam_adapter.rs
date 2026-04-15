@@ -1,7 +1,7 @@
 //! Adapter that wraps a SamBackend as an InferenceBackend.
 
 use super::{ImageContext, InferenceBackend, InferenceResult, ProgressCallback};
-use crate::sam::{CachedEmbedding, EmbeddingCache, EncoderOutput, SamBackend, SamPoint};
+use crate::sam::{CachedEmbedding, EmbeddingCache, SamBackend, SamPoint};
 use async_trait::async_trait;
 use hvat_common::{InputSchema, ModelCapability, ModelType, OutputSchema};
 use serde_json::{Value, json};
@@ -98,11 +98,9 @@ impl<B: SamBackend + ?Sized + 'static> InferenceBackend for SamInferenceAdapter<
             .encode_image(&image.rgb_data, image.width, image.height)
             .await?;
 
-        // Convert EncoderOutput to CachedEmbedding and store
+        // Cache runtime-specific encoded state without assuming SAM2 tensor shapes.
         let cached = CachedEmbedding {
-            image_embed: output.image_embed,
-            high_res_feats_0: output.high_res_feats_0,
-            high_res_feats_1: output.high_res_feats_1,
+            encoded_state: output,
             width: image.width,
             height: image.height,
         };
@@ -141,13 +139,6 @@ impl<B: SamBackend + ?Sized + 'static> InferenceBackend for SamInferenceAdapter<
             cb(50, "Running decoder...");
         }
 
-        // Convert CachedEmbedding back to EncoderOutput for decode_mask
-        let encoder_output = EncoderOutput {
-            image_embed: cached.image_embed,
-            high_res_feats_0: cached.high_res_feats_0,
-            high_res_feats_1: cached.high_res_feats_1,
-        };
-
         // Parse inputs
         let points = parse_sam_points(&inputs)?;
         let box_prompt = parse_sam_box(&inputs)?;
@@ -157,7 +148,7 @@ impl<B: SamBackend + ?Sized + 'static> InferenceBackend for SamInferenceAdapter<
         let result = self
             .backend
             .decode_mask(
-                &encoder_output,
+                &cached.encoded_state,
                 image.width,
                 image.height,
                 &points,

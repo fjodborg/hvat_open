@@ -14,12 +14,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use hvat_backend::ServerConfig;
 use hvat_backend::common::catalog::encode_image_id_from_relative;
 use hvat_backend::full_sam::sam::{
     EncoderOutput, ExecutionProvider, SamBackend, SamMaskResult, SamPoint,
 };
 use hvat_backend::full_sam::state::{AppState, SamBackendWiring};
-use hvat_backend::ServerConfig;
 use hvat_backend::full_sam3::routes as sam3_routes;
 use hvat_backend::full_sam3::state::SAM3_COMPAT_MODEL_ID;
 use hvat_common::{
@@ -89,11 +89,11 @@ impl SamBackend for MockSamBackend {
             image_rgb.len()
         );
 
-        Ok(EncoderOutput {
-            image_embed: vec![1.0, 2.0, 3.0, 4.0],
-            high_res_feats_0: vec![0.1, 0.2],
-            high_res_feats_1: vec![0.3, 0.4],
-        })
+        Ok(EncoderOutput::sam2_onnx(
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![0.1, 0.2],
+            vec![0.3, 0.4],
+        ))
     }
 
     async fn decode_mask(
@@ -317,7 +317,14 @@ async fn setup_test_session(factory: SamBackendFactory) -> Option<TestSession> {
         serde_json::from_slice(&caps_payload).expect("capabilities payload should decode");
     assert!(caps.features.inference);
     assert!(caps.features.sam);
-    assert!(caps.models.iter().any(|m| m.id == SAM3_COMPAT_MODEL_ID));
+    let model = caps
+        .models
+        .iter()
+        .find(|m| m.id == SAM3_COMPAT_MODEL_ID)
+        .expect("SAM3 compat model should be advertised");
+    assert!(model.supports_point_to_mask());
+    assert!(model.supports_bbox_to_mask());
+    assert!(model.supports_point_bbox_to_mask());
 
     Some(TestSession {
         _data_dir: data_dir,

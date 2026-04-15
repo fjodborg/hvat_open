@@ -95,19 +95,62 @@ impl SamPoint {
     }
 }
 
-/// Output from the SAM encoder.
-///
-/// SAM 2 encoder produces three outputs needed for decoding:
-/// - Main image embedding
-/// - Two sets of high-resolution features
-#[derive(Debug, Clone)]
-pub struct EncoderOutput {
+/// SAM2 ONNX encoded image state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sam2OnnxEncodedState {
     /// Main image embedding (256, 64, 64).
     pub image_embed: Vec<f32>,
     /// High resolution features 0 (32, 256, 256).
     pub high_res_feats_0: Vec<f32>,
     /// High resolution features 1 (64, 128, 128).
     pub high_res_feats_1: Vec<f32>,
+}
+
+/// Output from the SAM encoder.
+///
+/// This is backend-agnostic so different runtimes can cache and reuse
+/// encoded image state without forcing a SAM2-specific tensor layout.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EncoderOutput {
+    /// SAM2 ONNX encoder output tensors.
+    Sam2Onnx(Sam2OnnxEncodedState),
+    /// Runtime-defined encoded state payload.
+    ///
+    /// Useful for native runtimes whose encoded state does not map to
+    /// fixed SAM2 ONNX tensors.
+    BackendSpecific {
+        backend_name: String,
+        format: String,
+        data: Vec<u8>,
+    },
+}
+
+impl EncoderOutput {
+    pub fn sam2_onnx(
+        image_embed: Vec<f32>,
+        high_res_feats_0: Vec<f32>,
+        high_res_feats_1: Vec<f32>,
+    ) -> Self {
+        Self::Sam2Onnx(Sam2OnnxEncodedState {
+            image_embed,
+            high_res_feats_0,
+            high_res_feats_1,
+        })
+    }
+
+    pub fn as_sam2_onnx(&self) -> Option<&Sam2OnnxEncodedState> {
+        match self {
+            Self::Sam2Onnx(state) => Some(state),
+            Self::BackendSpecific { .. } => None,
+        }
+    }
+
+    pub fn kind(&self) -> &str {
+        match self {
+            Self::Sam2Onnx(_) => "sam2-onnx",
+            Self::BackendSpecific { format, .. } => format.as_str(),
+        }
+    }
 }
 
 /// Result of SAM mask prediction.
@@ -148,7 +191,7 @@ pub trait SamBackend: Send + Sync {
     /// * `height` - Image height in pixels
     ///
     /// # Returns
-    /// Encoder outputs: (image_embed, high_res_feats_0, high_res_feats_1)
+    /// Runtime-specific encoded image state.
     async fn encode_image(
         &self,
         image_rgb: &[u8],

@@ -1,114 +1,84 @@
-# hvat
+# HVAT
 
-> **Note:** This is a working title. The repository may be renamed in the future.
+Hyperspectral Visualization and Annotation Tool.
 
-**Hyperspectral Visualization and Annotation Tool** — A GPU-accelerated application for viewing and annotating hyperspectral and RGB images. Runs in both native and WASM environments.
+HVAT is a GPU-accelerated system for viewing and annotating hyperspectral and RGB images, with a Leptos/WebGPU frontend and an Axum backend.
 
 ## Demo
 
 [Live demo](https://fjodborg.github.io/hvat/)
 
-## Why another annotation tool?
+## Workspace
 
-I built this out of frustration with existing tools that either only work with RGB images, don't match my workflow, or are so outdated that they lack GPU acceleration and multithreading support.
+- `hvat_leptos`: frontend (Leptos CSR + Thaw + WebGPU)
+- `hvat_backend`: backend (Axum + `/api/ws` multiplexed protocol)
+- `hvat_common`: shared protocol/error/data types
+- `hvat_gpu`: rendering layer shared by frontend/tests
+- `hvat_visual_tests`: visual and E2E tests
 
-The direction and scope are still evolving, but it currently serves my use cases well. The focus will likely remain on hyperspectral images and CV-assisted annotation — both classical algorithms and modern AI-based approaches. I'll continue extending it as needed.
-
-## Building
+## Quick Start
 
 ```bash
-# Native build
-cargo build --release
-cargo run --release
-
-# WASM build (requires trunk)
-trunk build --release
-trunk serve --release  # Open the app under localhost:8080
+# Format and build workspace
+cargo fmt --all
+cargo build
 ```
 
----
+### Frontend (WASM)
 
-## Features
-<details>
-<summary>Completed</summary>
+```bash
+cd hvat_leptos && trunk build
+cd hvat_leptos && trunk serve
+```
 
-- Image viewer with pan/zoom and keyboard shortcuts
-- GPU-accelerated hyperspectral band rendering
-    - RGB band selection sliders
-    - Image enhancements (brightness, contrast, gamma, hue)
-- Folder browsing with image discovery
-    - Standard image formats (PNG, JPEG, etc.)
-- Tool selection UI for annotations
-- Basic label category management
-- Basic per-image tagging
-- Undo/redo system
+### Backend (from repo root)
 
-</details>
+Cargo aliases are defined in `.cargo/config.toml`.
 
-<details>
-<summary>In Progress</summary>
+```bash
+cargo serve
+cargo serve-sam
+cargo serve-sam3
+cargo serve-debug
+```
 
-- Annotation system
-    - [x] Bounding box drawing
-    - [x] Polygon drawing
-    - [x] Point annotation
-    - [x] Annotation overlay rendering
-    - [ ] Selection/editing of annotations
-    - [ ] Store annotations
-    - [ ] Export annotations
+### Visual Tests
 
-</details>
+```bash
+cargo test -p hvat_visual_tests
+HEADLESS=false cargo test -p hvat_visual_tests -- --nocapture
+UPDATE_BASELINES=true cargo test -p hvat_visual_tests
+```
 
-<details>
-<summary>Roadmap</summary>
+### Test Event Build (frontend)
 
-- Drag-and-drop file loading
-- Histogram display and auto-stretch
-- Basic CV algorithms for aided annotation
-    - e.g. watershed, edge detection etc
-- Spectral signature plot
-- ENVI format (.hdr/.raw)
-- Extend Annotation system 
-    - Export formats (COCO, YOLO, Pascal VOC)
-- SAM2 tiny integration
-- Image normalizations options: 
-    - total brightness
-    - percentiles 3-97%
-    - channel based 
+```bash
+cd hvat_leptos && TRUNK_BUILD_FEATURES="test-events" trunk build
+```
 
-</details>
+## Protocol and Integration Docs
 
+- `PROTOCOL.md`: canonical WebSocket protocol spec
+- `CUSTOM_BACKEND_BOUNDARY.md`: minimum compatibility contract for custom backends
+- `CUSTOM_BACKEND_API_REFERENCE.md`: HTTP + WebSocket API reference
 
-<details>
-<summary>Spaceprogram (Maybe in the future features)</summary>
+## Capability-First Backend Contract
 
-- Wasm plugin modules (Maybe community made plugins?)
-- Tiling/chunk loading
-    - Dynamic resolution
-    - Data formats
-- Stitching
-    - Line scan
-    - Pictures
-- Machine learning Integration / Python
-- Data Visualization
-- Machine learning training visualization (e.g. like tensorboard)
-    - e.g. show poorest performance picture
-- Video Annotation
-- 3D Annotation
+- Frontend/backend interoperability is capability-driven, not backend-name driven.
+- Backends are replaceable as long as they advertise compatible capability schemas.
+- Frontend must use capability-declared input/output field names and types, never hardcoded model IDs.
+- Universal behavior agreement is expressed through:
+  - server-level feature flags (for example, streaming, project state, downloads),
+  - model input/output type combinations (for example, point-to-mask, bbox-to-mask, point+bbox-to-mask).
+- Protocol/docs are a development guideline during implementation and should be aligned before release candidates.
 
-</details>
+## Active Planning Docs
 
-<details>
-<summary>Known Limitations</summary>
+- `SAM3_BACKEND_PLAN.md`: active SAM3 backend roadmap and execution plan
+- `docs/sam3_code_change_map.md`: file-level SAM3 implementation checklist
+- `streaming_plan.md`: current streaming/navigation orchestration plan
 
-- **Wasm gpu rendering** — There will sometimes be lag spikes when preloading many images at once, but it is worth.
-- **Native drag-and-drop not supported on Wayland** — Winit doesn't support drag-and-drop on Wayland. I use Wayland so i couldn't test it properly. 
-- **Only tested on Linux** — Windows and macOS support not verified.
-- **Annotation import is still buggy** — Importing annotations is still buggy and needs some love.
+## Notes
 
-</details>
-
-<details>
-<summary>Known Bugs (Yes, bugs are a subset of features)</summary>
-
-</details>
+- WebSocket communication is multiplexed on `/api/ws`.
+- `hvat_leptos` stays on Rust 2021 (wasm-bindgen constraint); other crates use Rust 2024.

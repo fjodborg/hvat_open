@@ -495,10 +495,12 @@ impl ServerCapabilities {
 
     /// Find a SAM-compatible segmentation model.
     ///
-    /// A model is considered SAM-compatible when it accepts `point_list`
-    /// inputs and returns `polygon_list` outputs.
+    /// A model is considered SAM-compatible when it supports universal
+    /// `seg.point_to_mask` semantics.
     pub fn find_sam_prompt_model(&self) -> Option<&ModelCapability> {
-        self.models.iter().find(|model| model.is_sam_compatible())
+        self.models
+            .iter()
+            .find(|model| model.supports_point_to_mask())
     }
 
     /// Whether inference is supported.
@@ -655,17 +657,72 @@ pub struct ModelCapability {
 }
 
 impl ModelCapability {
-    /// Whether this model is SAM-compatible (accepts point prompts, returns polygons).
-    pub fn is_sam_compatible(&self) -> bool {
+    fn has_input_type(&self, input_type: &str) -> bool {
+        self.inputs
+            .iter()
+            .any(|input| input.input_type == input_type)
+    }
+
+    fn has_any_input_type(&self, input_types: &[&str]) -> bool {
+        input_types
+            .iter()
+            .any(|input_type| self.has_input_type(input_type))
+    }
+
+    fn has_output_type(&self, output_type: &str) -> bool {
+        self.outputs
+            .iter()
+            .any(|output| output.output_type == output_type)
+    }
+
+    fn supports_mask_output(&self) -> bool {
+        self.has_output_type("polygon_list") || self.has_output_type("mask")
+    }
+
+    /// Whether this model supports universal `seg.point_to_mask` semantics.
+    pub fn supports_point_to_mask(&self) -> bool {
         self.model_type == ModelType::Segmentation
-            && self
-                .inputs
-                .iter()
-                .any(|input| input.input_type == "point_list")
-            && self
-                .outputs
-                .iter()
-                .any(|output| output.output_type == "polygon_list")
+            && self.has_input_type("point_list")
+            && self.supports_mask_output()
+    }
+
+    /// Whether this model supports universal `seg.bbox_to_mask` semantics.
+    pub fn supports_bbox_to_mask(&self) -> bool {
+        self.model_type == ModelType::Segmentation
+            && self.has_input_type("bbox")
+            && self.supports_mask_output()
+    }
+
+    /// Whether this model supports universal `seg.point_bbox_to_mask` semantics.
+    pub fn supports_point_bbox_to_mask(&self) -> bool {
+        self.model_type == ModelType::Segmentation
+            && self.has_input_type("point_list")
+            && self.has_input_type("bbox")
+            && self.supports_mask_output()
+    }
+
+    /// Whether this model supports universal `seg.text_to_mask` semantics.
+    pub fn supports_text_to_mask(&self) -> bool {
+        self.model_type == ModelType::Segmentation
+            && self.has_input_type("text")
+            && self.supports_mask_output()
+    }
+
+    /// Whether this model supports universal `seg.example_similarity_to_mask` semantics.
+    ///
+    /// Example prompting can be represented as `region`, `mask`, `embedding`,
+    /// or `image_region` (legacy synonym).
+    pub fn supports_example_similarity_to_mask(&self) -> bool {
+        self.model_type == ModelType::Segmentation
+            && self.has_any_input_type(&["region", "mask", "embedding", "image_region"])
+            && self.supports_mask_output()
+    }
+
+    /// Whether this model is SAM-compatible (accepts point prompts, returns masks).
+    ///
+    /// This is a compatibility alias for `supports_point_to_mask`.
+    pub fn is_sam_compatible(&self) -> bool {
+        self.supports_point_to_mask()
     }
 }
 

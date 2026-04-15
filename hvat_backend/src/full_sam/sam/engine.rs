@@ -633,11 +633,11 @@ impl SamBackend for OnnxSamEngine {
                 high_res_1_data.len()
             );
 
-            Ok(EncoderOutput {
-                image_embed: image_embed_data.to_vec(),
-                high_res_feats_0: high_res_0_data.to_vec(),
-                high_res_feats_1: high_res_1_data.to_vec(),
-            })
+            Ok(EncoderOutput::sam2_onnx(
+                image_embed_data.to_vec(),
+                high_res_0_data.to_vec(),
+                high_res_1_data.to_vec(),
+            ))
         })
         .await?
     }
@@ -656,6 +656,13 @@ impl SamBackend for OnnxSamEngine {
         let decoder = Arc::clone(&self.decoder);
 
         tokio::task::spawn_blocking(move || {
+            let sam2_state = encoder_output.as_sam2_onnx().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unsupported encoded state '{}' for SAM2 ONNX decoder",
+                    encoder_output.kind()
+                )
+            })?;
+
             // Prepare point inputs (including box prompt as label 2/3 points)
             let (point_coords, point_labels) =
                 Self::scale_points_and_box(&points, box_prompt, original_width, original_height);
@@ -664,16 +671,16 @@ impl SamBackend for OnnxSamEngine {
 
             // Create image embedding tensor (1, 256, 64, 64)
             let image_embed_tensor =
-                Tensor::from_array(([1i64, 256, 64, 64], encoder_output.image_embed))?;
+                Tensor::from_array(([1i64, 256, 64, 64], sam2_state.image_embed.clone()))?;
 
             // Create high resolution feature tensors
             // high_res_feats_0: (1, 32, 256, 256)
             let high_res_0_tensor =
-                Tensor::from_array(([1i64, 32, 256, 256], encoder_output.high_res_feats_0))?;
+                Tensor::from_array(([1i64, 32, 256, 256], sam2_state.high_res_feats_0.clone()))?;
 
             // high_res_feats_1: (1, 64, 128, 128)
             let high_res_1_tensor =
-                Tensor::from_array(([1i64, 64, 128, 128], encoder_output.high_res_feats_1))?;
+                Tensor::from_array(([1i64, 64, 128, 128], sam2_state.high_res_feats_1.clone()))?;
 
             // Create point tensors
             let coords_tensor = Tensor::from_array(([1i64, num_points, 2], point_coords))?;

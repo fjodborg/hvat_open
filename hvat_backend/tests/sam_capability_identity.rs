@@ -9,12 +9,12 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
 
+use hvat_backend::ServerConfig;
 use hvat_backend::full_sam::routes as sam2_routes;
 use hvat_backend::full_sam::sam::{
     EncoderOutput, ExecutionProvider, SamBackend, SamMaskResult, SamPoint,
 };
 use hvat_backend::full_sam::state::{AppState, SamBackendWiring};
-use hvat_backend::ServerConfig;
 use hvat_backend::full_sam3::routes as sam3_routes;
 use hvat_common::{PROTOCOL_VERSION, ServerCapabilities, ServerMessageType};
 
@@ -183,4 +183,10 @@ async fn sam2_and_sam3_routes_advertise_distinct_model_ids() {
 
     assert!(sam2_caps.models[0].is_sam_compatible());
     assert!(sam3_caps.models[0].is_sam_compatible());
+    assert!(sam2_caps.models[0].supports_point_to_mask());
+    assert!(sam2_caps.models[0].supports_bbox_to_mask());
+    assert!(sam2_caps.models[0].supports_point_bbox_to_mask());
+    assert!(sam3_caps.models[0].supports_point_to_mask());
+    assert!(sam3_caps.models[0].supports_bbox_to_mask());
+    assert!(sam3_caps.models[0].supports_point_bbox_to_mask());
 }

@@ -1,13 +1,19 @@
 use super::*;
 
+fn sam2_state(seed: f32) -> EncoderOutput {
+    EncoderOutput::sam2_onnx(vec![seed], vec![seed + 1.0], vec![seed + 2.0])
+}
+
 #[tokio::test]
 async fn test_cache_insert_get() {
     let cache = EmbeddingCache::new(10);
 
     let embedding = CachedEmbedding {
-        image_embed: vec![1.0, 2.0, 3.0],
-        high_res_feats_0: vec![4.0, 5.0],
-        high_res_feats_1: vec![6.0, 7.0],
+        encoded_state: EncoderOutput::sam2_onnx(
+            vec![1.0, 2.0, 3.0],
+            vec![4.0, 5.0],
+            vec![6.0, 7.0],
+        ),
         width: 100,
         height: 100,
     };
@@ -15,7 +21,11 @@ async fn test_cache_insert_get() {
     cache.insert("hash1".to_string(), embedding.clone()).await;
 
     let retrieved = cache.get("hash1").await.unwrap();
-    assert_eq!(retrieved.image_embed, vec![1.0, 2.0, 3.0]);
+    let sam2 = retrieved
+        .encoded_state
+        .as_sam2_onnx()
+        .expect("expected sam2 encoded state");
+    assert_eq!(sam2.image_embed, vec![1.0, 2.0, 3.0]);
     assert_eq!(retrieved.width, 100);
 }
 
@@ -25,9 +35,7 @@ async fn test_cache_lru_eviction() {
 
     for i in 0..3 {
         let embedding = CachedEmbedding {
-            image_embed: vec![i as f32],
-            high_res_feats_0: vec![],
-            high_res_feats_1: vec![],
+            encoded_state: sam2_state(i as f32),
             width: 100,
             height: 100,
         };
@@ -46,9 +54,7 @@ async fn test_dimension_mismatch_detection() {
 
     // Insert embedding with specific dimensions
     let embedding = CachedEmbedding {
-        image_embed: vec![1.0, 2.0, 3.0],
-        high_res_feats_0: vec![],
-        high_res_feats_1: vec![],
+        encoded_state: sam2_state(1.0),
         width: 800,
         height: 600,
     };
@@ -78,9 +84,7 @@ async fn test_cache_update_with_new_dimensions() {
 
     // Insert initial embedding
     let embedding1 = CachedEmbedding {
-        image_embed: vec![1.0],
-        high_res_feats_0: vec![],
-        high_res_feats_1: vec![],
+        encoded_state: sam2_state(1.0),
         width: 800,
         height: 600,
     };
@@ -88,9 +92,7 @@ async fn test_cache_update_with_new_dimensions() {
 
     // Update with new embedding (different dimensions)
     let embedding2 = CachedEmbedding {
-        image_embed: vec![2.0],
-        high_res_feats_0: vec![],
-        high_res_feats_1: vec![],
+        encoded_state: sam2_state(2.0),
         width: 1024,
         height: 768,
     };
@@ -100,5 +102,9 @@ async fn test_cache_update_with_new_dimensions() {
     let cached = cache.get("hash1").await.unwrap();
     assert_eq!(cached.width, 1024);
     assert_eq!(cached.height, 768);
-    assert_eq!(cached.image_embed, vec![2.0]);
+    let sam2 = cached
+        .encoded_state
+        .as_sam2_onnx()
+        .expect("expected sam2 encoded state");
+    assert_eq!(sam2.image_embed, vec![2.0]);
 }

@@ -1,5 +1,6 @@
 use super::*;
 use crate::full_sam3::config::Sam3RuntimeKind;
+use tempfile::tempdir;
 
 #[test]
 fn sam3_compat_wiring_uses_distinct_model_identity() {
@@ -13,13 +14,19 @@ fn sam3_compat_wiring_uses_distinct_model_identity() {
 
 #[test]
 fn native_runtime_init_surfaces_artifacts_in_error_context() {
+    let temp = tempdir().expect("tempdir");
+    let checkpoint_path = temp.path().join("sam3.pt");
+    let config_path = temp.path().join("config.json");
+    std::fs::write(&checkpoint_path, "fake checkpoint").expect("write checkpoint");
+    std::fs::write(&config_path, "{}").expect("write config");
+
     let mut config = ServerConfig {
         sam_enabled: true,
         ..ServerConfig::default()
     };
     config.sam3_runtime = Sam3RuntimeKind::Native;
-    config.sam3_checkpoint = Some(std::path::PathBuf::from("/tmp/sam3.pt"));
-    config.sam3_config = Some(std::path::PathBuf::from("/tmp/config.json"));
+    config.sam3_checkpoint = Some(checkpoint_path.clone());
+    config.sam3_config = Some(config_path.clone());
 
     let err = match build_app_state(config) {
         Ok(_) => panic!("native runtime should not initialize yet"),
@@ -33,8 +40,8 @@ fn native_runtime_init_surfaces_artifacts_in_error_context() {
             ..
         } => {
             assert_eq!(backend_name, "sam3-native");
-            assert!(expected_files.contains("/tmp/sam3.pt"));
-            assert!(expected_files.contains("/tmp/config.json"));
+            assert!(expected_files.contains(checkpoint_path.to_string_lossy().as_ref()));
+            assert!(expected_files.contains(config_path.to_string_lossy().as_ref()));
             assert!(source.to_string().contains("not implemented yet"));
         }
     }

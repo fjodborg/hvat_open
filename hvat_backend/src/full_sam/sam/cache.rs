@@ -8,20 +8,16 @@ use lru::LruCache;
 use std::num::NonZeroUsize;
 use tokio::sync::RwLock;
 
+use crate::sam::EncoderOutput;
+
 /// Cached image embedding with metadata.
 ///
-/// SAM 2 encoder produces three outputs that are all needed for decoding:
-/// - `image_embed`: Main image embedding (256, 64, 64)
-/// - `high_res_feats_0`: High resolution features (32, 256, 256)
-/// - `high_res_feats_1`: High resolution features (64, 128, 128)
+/// Encoded state is runtime-defined (`EncoderOutput`) so the cache does not
+/// assume a SAM2 tensor layout.
 #[derive(Clone)]
 pub struct CachedEmbedding {
-    /// The main image embedding vector (256 * 64 * 64 = 1048576 floats).
-    pub image_embed: Vec<f32>,
-    /// High resolution features 0 (32 * 256 * 256 = 2097152 floats).
-    pub high_res_feats_0: Vec<f32>,
-    /// High resolution features 1 (64 * 128 * 128 = 1048576 floats).
-    pub high_res_feats_1: Vec<f32>,
+    /// Runtime-specific encoded representation from `SamBackend::encode_image`.
+    pub encoded_state: EncoderOutput,
     /// Original image width (for coordinate scaling).
     pub width: u32,
     /// Original image height (for coordinate scaling).

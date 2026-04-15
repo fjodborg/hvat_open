@@ -1,5 +1,34 @@
 use super::*;
 
+fn segmentation_capability_with_types(inputs: &[&str], outputs: &[&str]) -> ModelCapability {
+    ModelCapability {
+        id: "seg-model".to_string(),
+        name: "Seg Model".to_string(),
+        model_type: ModelType::Segmentation,
+        description: String::new(),
+        inputs: inputs
+            .iter()
+            .map(|input_type| InputSchema {
+                name: format!("input_{input_type}"),
+                input_type: (*input_type).to_string(),
+                required: false,
+                description: String::new(),
+            })
+            .collect(),
+        outputs: outputs
+            .iter()
+            .map(|output_type| OutputSchema {
+                name: format!("output_{output_type}"),
+                output_type: (*output_type).to_string(),
+                description: String::new(),
+            })
+            .collect(),
+        options: HashMap::new(),
+        requires_embedding: false,
+        embedding_time_ms: 0,
+    }
+}
+
 #[test]
 fn test_message_type_roundtrip() {
     assert_eq!(
@@ -258,8 +287,58 @@ fn test_find_sam_prompt_model_from_capabilities() {
 
     let model = caps.find_sam_prompt_model().expect("SAM model not found");
     assert_eq!(model.id, "sam-like");
+    assert!(model.supports_point_to_mask());
+    assert!(model.supports_bbox_to_mask());
+    assert!(model.supports_point_bbox_to_mask());
     assert!(caps.supports_inference());
     assert!(caps.supports_sam());
+}
+
+#[test]
+fn test_find_sam_prompt_model_accepts_mask_output() {
+    let mut caps = ServerCapabilities::default();
+    caps.models.push(segmentation_capability_with_types(
+        &["point_list"],
+        &["mask"],
+    ));
+
+    let model = caps.find_sam_prompt_model().expect("SAM model not found");
+    assert!(model.supports_point_to_mask());
+}
+
+#[test]
+fn test_model_capability_universal_semantics_positive() {
+    let model = segmentation_capability_with_types(
+        &["point_list", "bbox", "text", "region"],
+        &["polygon_list", "float_list"],
+    );
+
+    assert!(model.supports_point_to_mask());
+    assert!(model.supports_bbox_to_mask());
+    assert!(model.supports_point_bbox_to_mask());
+    assert!(model.supports_text_to_mask());
+    assert!(model.supports_example_similarity_to_mask());
+}
+
+#[test]
+fn test_model_capability_universal_semantics_negative_without_mask_output() {
+    let model = segmentation_capability_with_types(&["point_list", "bbox", "text"], &["bbox_list"]);
+
+    assert!(!model.supports_point_to_mask());
+    assert!(!model.supports_bbox_to_mask());
+    assert!(!model.supports_point_bbox_to_mask());
+    assert!(!model.supports_text_to_mask());
+    assert!(!model.supports_example_similarity_to_mask());
+}
+
+#[test]
+fn test_model_capability_example_similarity_from_mask_or_embedding_input() {
+    let mask_prompt_model = segmentation_capability_with_types(&["mask"], &["mask"]);
+    assert!(mask_prompt_model.supports_example_similarity_to_mask());
+
+    let embedding_prompt_model =
+        segmentation_capability_with_types(&["embedding"], &["polygon_list"]);
+    assert!(embedding_prompt_model.supports_example_similarity_to_mask());
 }
 
 #[test]
