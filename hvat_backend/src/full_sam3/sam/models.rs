@@ -93,18 +93,48 @@ pub fn backend_name(spec: &Sam3RuntimeModelSpec) -> &'static str {
 }
 
 fn ensure_native_checkpoint_file(path: &Path) -> std::result::Result<(), Sam3ModelSpecError> {
-    if !path.exists() {
-        return Err(Sam3ModelSpecError::NativeCheckpointNotFound {
+    ensure_existing_regular_file(
+        path,
+        Sam3ModelSpecError::NativeCheckpointNotFound {
             path: path.to_path_buf(),
-        });
+        },
+        Sam3ModelSpecError::NativeCheckpointNotFile {
+            path: path.to_path_buf(),
+        },
+    )?;
+    ensure_non_empty(path)
+}
+
+fn ensure_native_config_file(path: &Path) -> std::result::Result<(), Sam3ModelSpecError> {
+    ensure_existing_regular_file(
+        path,
+        Sam3ModelSpecError::NativeConfigNotFound {
+            path: path.to_path_buf(),
+        },
+        Sam3ModelSpecError::NativeConfigNotFile {
+            path: path.to_path_buf(),
+        },
+    )?;
+    ensure_valid_json(path)
+}
+
+fn ensure_existing_regular_file(
+    path: &Path,
+    not_found_error: Sam3ModelSpecError,
+    not_file_error: Sam3ModelSpecError,
+) -> std::result::Result<(), Sam3ModelSpecError> {
+    if !path.exists() {
+        return Err(not_found_error);
     }
 
     if !path.is_file() {
-        return Err(Sam3ModelSpecError::NativeCheckpointNotFile {
-            path: path.to_path_buf(),
-        });
+        return Err(not_file_error);
     }
 
+    Ok(())
+}
+
+fn ensure_non_empty(path: &Path) -> std::result::Result<(), Sam3ModelSpecError> {
     let metadata = std::fs::metadata(path).map_err(|source| {
         Sam3ModelSpecError::NativeCheckpointMetadataReadFailed {
             path: path.to_path_buf(),
@@ -120,19 +150,7 @@ fn ensure_native_checkpoint_file(path: &Path) -> std::result::Result<(), Sam3Mod
     Ok(())
 }
 
-fn ensure_native_config_file(path: &Path) -> std::result::Result<(), Sam3ModelSpecError> {
-    if !path.exists() {
-        return Err(Sam3ModelSpecError::NativeConfigNotFound {
-            path: path.to_path_buf(),
-        });
-    }
-
-    if !path.is_file() {
-        return Err(Sam3ModelSpecError::NativeConfigNotFile {
-            path: path.to_path_buf(),
-        });
-    }
-
+fn ensure_valid_json(path: &Path) -> std::result::Result<(), Sam3ModelSpecError> {
     let config_data = std::fs::read_to_string(path).map_err(|source| {
         Sam3ModelSpecError::InvalidNativeConfigJson {
             path: path.to_path_buf(),

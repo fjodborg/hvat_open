@@ -38,5 +38,3 @@ CLEANUP.md
 todo
 test.log
 test_multiband.npy
-hvat_visual_tests/
-*.md
