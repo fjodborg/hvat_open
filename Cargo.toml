@@ -5,9 +5,6 @@ members = [
     "hvat_gpu",
     "hvat_backend",
     "hvat_visual_tests",
-    "hvat_core",
-    "hvat_test_fakes",
-    "hvat_probe",
 ]
 resolver = "2"
 

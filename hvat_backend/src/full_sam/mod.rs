@@ -1,4 +1,4 @@
-//! Full HVAT backend mode with pyramid streaming and SAM inference.
+//! Full HVAT backend mode with REST image loading and SAM inference.
 
 pub mod config;
 pub mod error;

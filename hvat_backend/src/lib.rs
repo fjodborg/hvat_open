@@ -10,6 +10,7 @@ pub mod common;
 pub mod full_sam;
 pub mod full_sam3;
 pub mod helper;
+#[cfg(feature = "legacy-ws")]
 pub mod simple;
 
 // Keep root-level exports for existing call sites.

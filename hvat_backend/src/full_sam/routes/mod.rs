@@ -1,8 +1,11 @@
 //! API routes for the HVAT server.
 
+mod capabilities;
 mod images;
+mod metrics;
 mod projects;
-mod websocket_mux;
+mod sam;
+mod sam_service;
 
 use std::sync::Arc;
 
@@ -19,25 +22,22 @@ use crate::state::AppState;
 /// - `POST /api/images/upload` - Upload images/folders into server data directory
 /// - `GET /api/project-state` - Load saved native project annotations
 /// - `PUT /api/project-state` - Save native project annotations
+/// - `GET /api/capabilities` - REST capabilities payload
+/// - `GET /api/metrics` - REST route telemetry snapshot
 /// - `GET /api/images/:id/meta` - Image metadata
 /// - `GET /api/images/download` - Download all project images as ZIP
 /// - `GET /api/images/download/plan` - Chunked image-download plan
 /// - `GET /api/images/download/part/:index` - Download one ZIP chunk
-/// - `WS /api/ws` - Multiplexed WebSocket streaming
 pub fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         // Server info and image listing from projects module
         .merge(projects::router())
+        // REST capabilities contract
+        .route("/capabilities", get(capabilities::get_capabilities))
+        // REST endpoint telemetry snapshot for dashboards
+        .route("/metrics", get(metrics::get_metrics))
         // Image metadata and streaming from images module
         .nest("/images", images::router())
-        // Multiplexed WebSocket endpoint
-        .route("/ws", get(ws_handler))
-}
-
-/// WebSocket upgrade handler for multiplexed streaming.
-async fn ws_handler(
-    ws: axum::extract::WebSocketUpgrade,
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-) -> axum::response::Response {
-    ws.on_upgrade(move |socket| websocket_mux::handle_websocket_mux(socket, state))
+        // REST SAM routes
+        .nest("/sam", sam::router())
 }

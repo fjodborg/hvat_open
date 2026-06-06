@@ -20,9 +20,11 @@
 pub mod backend;
 pub mod cache;
 pub mod engine;
+pub mod mock;
 pub mod models;
 
 pub use backend::{EncoderOutput, ExecutionProvider, SamBackend, SamMaskResult, SamPoint};
 pub use cache::{CachedEmbedding, EmbeddingCache};
 pub use engine::OnnxSamEngine;
+pub use mock::{MockSamBackend, mock_expected_files, mock_factory, mock_model_name};
 pub use models::SamVariant;

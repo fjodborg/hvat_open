@@ -22,6 +22,7 @@ pub mod project_state;
 pub mod protocol;
 pub mod streaming;
 pub mod upload;
+#[cfg(feature = "legacy-ws")]
 pub mod websocket;
 
 mod frame;

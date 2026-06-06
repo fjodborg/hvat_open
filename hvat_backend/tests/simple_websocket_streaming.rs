@@ -1,3 +1,5 @@
+#![cfg(feature = "legacy-ws")]
+
 //! Integration tests for the HVAT simple backend.
 
 use futures_util::{SinkExt, StreamExt};

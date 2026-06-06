@@ -18,6 +18,7 @@ use hvat_common::pixel_count_u32;
 use serde::Serialize;
 
 use crate::error::{Error, Result};
+use crate::packer::pack_bands_to_rgba_layers;
 use crate::pyramid::{PyramidStatus, compute_image_hash};
 use crate::state::AppState;
 use crate::utils::find_image;
@@ -61,6 +62,8 @@ pub struct PyramidLevel {
     pub height: u32,
 }
 
+type PackedLayers = Vec<(u32, Vec<u8>)>;
+
 /// Create the images router.
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -68,9 +71,124 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/download/plan", get(download_images_plan))
         .route("/download/part/{part_index}", get(download_images_part))
         .route("/{id}/meta", get(get_metadata))
-        // Legacy /{id}/stream route removed - use /api/ws multiplexed endpoint instead
+        .route("/{id}/bands", get(get_bands))
+        // Legacy /{id}/stream route removed - use REST /{id}/bands endpoint.
         .route("/{id}/thumbnail", get(get_thumbnail))
         .route("/{id}/raw", get(get_raw_image))
+}
+
+/// Get display bands packed as RGBA layers (`u8`) for direct frontend upload.
+async fn get_bands(
+    State(state): State<Arc<AppState>>,
+    Path(image_id): Path<String>,
+) -> std::result::Result<impl IntoResponse, (StatusCode, String)> {
+    let started = std::time::Instant::now();
+    let outcome: std::result::Result<_, (StatusCode, String)> = async {
+        let image_path = find_image(&state, &image_id)
+            .map_err(|e| (StatusCode::NOT_FOUND, format!("Image not found: {}", e)))?;
+
+        let loader = state.loaders.find_loader(&image_path).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Unsupported format for image '{}'", image_id),
+            )
+        })?;
+
+        let band_data = loader.load_bands(&image_path).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load image bands: {}", e),
+            )
+        })?;
+
+        let layers = build_full_layers(&band_data).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to build display payload: {}", e),
+            )
+        })?;
+
+        let payload = flatten_layers(&layers);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(
+            "X-Hvat-Width",
+            HeaderValue::from_str(&band_data.width.to_string()).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Header encoding failed: {}", e),
+                )
+            })?,
+        );
+        headers.insert(
+            "X-Hvat-Height",
+            HeaderValue::from_str(&band_data.height.to_string()).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Header encoding failed: {}", e),
+                )
+            })?,
+        );
+        headers.insert(
+            "X-Hvat-Num-Bands",
+            HeaderValue::from_str(&band_data.num_bands().to_string()).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Header encoding failed: {}", e),
+                )
+            })?,
+        );
+        headers.insert(
+            "X-Hvat-Num-Layers",
+            HeaderValue::from_str(&layers.len().to_string()).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Header encoding failed: {}", e),
+                )
+            })?,
+        );
+        headers.insert("X-Hvat-Payload", HeaderValue::from_static("rgba_layers_u8"));
+        headers.insert("X-Hvat-Layout", HeaderValue::from_static("layer-major"));
+        headers.insert("X-Hvat-Payload-Version", HeaderValue::from_static("1"));
+
+        Ok((StatusCode::OK, headers, Body::from(payload)))
+    }
+    .await;
+
+    let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    state
+        .rest_metrics
+        .record_image_bands(elapsed_ms, outcome.is_ok());
+    outcome
+}
+
+fn build_full_layers(
+    band_data: &crate::common::loaders::BandData,
+) -> std::result::Result<PackedLayers, String> {
+    if band_data.bands.is_empty() {
+        return Err("image has zero bands".to_string());
+    }
+    Ok(pack_bands_to_rgba_layers(
+        &band_data.bands,
+        band_data.width,
+        band_data.height,
+    ))
+}
+
+fn flatten_layers(layers: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let mut ordered: Vec<&(u32, Vec<u8>)> = layers.iter().collect();
+    ordered.sort_by_key(|(idx, _)| *idx);
+
+    let total_size: usize = ordered.iter().map(|(_, bytes)| bytes.len()).sum();
+    let mut out = Vec::with_capacity(total_size);
+    for (_, bytes) in ordered {
+        out.extend_from_slice(bytes);
+    }
+    out
 }
 
 /// Get image metadata.
@@ -451,4 +569,46 @@ fn calculate_pyramid_levels(width: u32, height: u32) -> Vec<PyramidLevel> {
     }
 
     levels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_band_data() -> crate::common::loaders::BandData {
+        crate::common::loaders::BandData {
+            width: 2,
+            height: 1,
+            bands: vec![vec![0.0, 1.0], vec![0.5, 0.5], vec![1.0, 0.0]],
+        }
+    }
+
+    #[test]
+    fn build_rgb_layers_clamps_requested_indices() {
+        let data = sample_band_data();
+        let requested = RgbBands {
+            red: 99,
+            green: 1,
+            blue: 2,
+        };
+
+        let (resolved, layers) = build_rgb_layers(&data, requested).expect("layers");
+
+        assert_eq!(
+            resolved,
+            RgbBands {
+                red: 2,
+                green: 1,
+                blue: 2
+            }
+        );
+        assert_eq!(layers.len(), data.num_layers() as usize);
+    }
+
+    #[test]
+    fn flatten_layers_concatenates_in_layer_order() {
+        let payload = flatten_layers(&[(1, vec![4, 5]), (0, vec![1, 2, 3])]);
+
+        assert_eq!(payload, vec![1, 2, 3, 4, 5]);
+    }
 }

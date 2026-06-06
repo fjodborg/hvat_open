@@ -12,16 +12,37 @@ name = "hvat_backend"
 path = "src/full_sam/main.rs"
 
 [[bin]]
+name = "hvat_backend_mock_sam"
+path = "src/full_sam/mock_main.rs"
+
+[[bin]]
 name = "simple"
 path = "src/simple/main.rs"
+required-features = ["legacy-ws"]
 
 [[bin]]
 name = "hvat_backend_sam3"
 path = "src/full_sam3/main.rs"
 
+[[example]]
+name = "custom_protocol_actions"
+path = "examples/custom_protocol_actions.rs"
+required-features = ["legacy-ws"]
+
+[[example]]
+name = "minimal_streaming_backend"
+path = "examples/minimal_streaming_backend.rs"
+required-features = ["legacy-ws"]
+
+[[example]]
+name = "streaming_state_downloads_backend"
+path = "examples/streaming_state_downloads_backend.rs"
+required-features = ["legacy-ws"]
+
 [features]
 default = []
 sam-cuda = ["ort/cuda"]
+legacy-ws = []
 
 [dependencies]
 # Shared utilities
@@ -33,7 +54,7 @@ axum-extra = { version = "0.10", features = ["typed-header"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["util", "timeout"] }
-tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "cors", "fs", "trace"] }
 
 # Serialization
 serde = { workspace = true }

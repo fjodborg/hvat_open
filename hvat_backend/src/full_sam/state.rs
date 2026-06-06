@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::Serialize;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
@@ -13,6 +14,97 @@ use crate::inference::{ModelRegistry, SamInferenceAdapter};
 use crate::loaders::ImageLoaderRegistry;
 use crate::pyramid::{FilesystemStorage, PyramidBuilder, PyramidStorage};
 use crate::sam::{EmbeddingCache, OnnxSamEngine, SamBackend};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EndpointMetricsSnapshot {
+    pub requests: u64,
+    pub errors: u64,
+    pub avg_latency_ms: u64,
+    pub max_latency_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RestMetricsSnapshot {
+    pub image_bands: EndpointMetricsSnapshot,
+    pub sam_infer: EndpointMetricsSnapshot,
+    pub sam_warm: EndpointMetricsSnapshot,
+}
+
+#[derive(Debug, Default)]
+struct EndpointMetrics {
+    requests: AtomicU64,
+    errors: AtomicU64,
+    total_latency_ms: AtomicU64,
+    max_latency_ms: AtomicU64,
+}
+
+impl EndpointMetrics {
+    fn record(&self, latency_ms: u64, ok: bool) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.total_latency_ms
+            .fetch_add(latency_ms, Ordering::Relaxed);
+        if !ok {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        update_max(&self.max_latency_ms, latency_ms);
+    }
+
+    fn snapshot(&self) -> EndpointMetricsSnapshot {
+        let requests = self.requests.load(Ordering::Relaxed);
+        let total_latency_ms = self.total_latency_ms.load(Ordering::Relaxed);
+        let avg_latency_ms = if requests == 0 {
+            0
+        } else {
+            total_latency_ms / requests
+        };
+        EndpointMetricsSnapshot {
+            requests,
+            errors: self.errors.load(Ordering::Relaxed),
+            avg_latency_ms,
+            max_latency_ms: self.max_latency_ms.load(Ordering::Relaxed),
+        }
+    }
+}
+
+fn update_max(max: &AtomicU64, value: u64) {
+    let mut current = max.load(Ordering::Relaxed);
+    while value > current {
+        match max.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RestRouteMetrics {
+    image_bands: EndpointMetrics,
+    sam_infer: EndpointMetrics,
+    sam_warm: EndpointMetrics,
+}
+
+impl RestRouteMetrics {
+    pub fn record_image_bands(&self, latency_ms: u64, ok: bool) {
+        self.image_bands.record(latency_ms, ok);
+    }
+
+    pub fn record_sam_infer(&self, latency_ms: u64, ok: bool) {
+        self.sam_infer.record(latency_ms, ok);
+    }
+
+    pub fn record_sam_warm(&self, latency_ms: u64, ok: bool) {
+        self.sam_warm.record(latency_ms, ok);
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> RestMetricsSnapshot {
+        RestMetricsSnapshot {
+            image_bands: self.image_bands.snapshot(),
+            sam_infer: self.sam_infer.snapshot(),
+            sam_warm: self.sam_warm.snapshot(),
+        }
+    }
+}
 
 /// Errors that can occur when initializing application state.
 #[derive(Debug, thiserror::Error)]
@@ -104,11 +196,14 @@ pub struct AppState {
     /// Model registry for inference backends (Protocol v2)
     pub model_registry: Option<Arc<ModelRegistry>>,
 
-    /// Active WebSocket connection count (atomic for lock-free access)
+    /// Active connection count retained for shared helper/example compatibility.
     pub active_connections: AtomicU64,
 
     /// Connection ID counter for generating unique IDs
     connection_id_counter: AtomicU64,
+
+    /// REST route telemetry counters for dashboarding.
+    pub rest_metrics: RestRouteMetrics,
 }
 
 impl AppState {
@@ -184,6 +279,7 @@ impl AppState {
             model_registry,
             active_connections: AtomicU64::new(0),
             connection_id_counter: AtomicU64::new(0),
+            rest_metrics: RestRouteMetrics::default(),
         })
     }
 

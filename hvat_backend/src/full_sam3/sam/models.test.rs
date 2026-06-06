@@ -5,8 +5,10 @@ use tempfile::tempdir;
 
 #[test]
 fn compat_spec_uses_configured_variant() {
-    let mut config = ServerConfig::default();
-    config.sam_variant = SamVariant::Large;
+    let config = ServerConfig {
+        sam_variant: SamVariant::Large,
+        ..ServerConfig::default()
+    };
 
     let spec = model_spec_from_config(&config).expect("spec resolution should succeed");
     assert_eq!(
@@ -19,9 +21,11 @@ fn compat_spec_uses_configured_variant() {
 
 #[test]
 fn native_spec_requires_checkpoint() {
-    let mut config = ServerConfig::default();
-    config.sam3_runtime = Sam3RuntimeKind::Native;
-    config.sam3_config = Some("/tmp/config.json".into());
+    let config = ServerConfig {
+        sam3_runtime: Sam3RuntimeKind::Native,
+        sam3_config: Some("/tmp/config.json".into()),
+        ..ServerConfig::default()
+    };
 
     let err = model_spec_from_config(&config).expect_err("missing checkpoint should fail");
     assert_eq!(err, Sam3ModelSpecError::MissingNativeCheckpoint);
@@ -29,9 +33,11 @@ fn native_spec_requires_checkpoint() {
 
 #[test]
 fn native_spec_requires_config() {
-    let mut config = ServerConfig::default();
-    config.sam3_runtime = Sam3RuntimeKind::Native;
-    config.sam3_checkpoint = Some("/tmp/sam3.pt".into());
+    let config = ServerConfig {
+        sam3_runtime: Sam3RuntimeKind::Native,
+        sam3_checkpoint: Some("/tmp/sam3.pt".into()),
+        ..ServerConfig::default()
+    };
 
     let err = model_spec_from_config(&config).expect_err("missing config should fail");
     assert_eq!(err, Sam3ModelSpecError::MissingNativeConfig);
@@ -56,10 +62,12 @@ fn native_spec_requires_existing_checkpoint_file() {
     let config_path = temp.path().join("config.json");
     std::fs::write(&config_path, "{}").expect("write config");
 
-    let mut config = ServerConfig::default();
-    config.sam3_runtime = Sam3RuntimeKind::Native;
-    config.sam3_checkpoint = Some(temp.path().join("missing.pt"));
-    config.sam3_config = Some(config_path);
+    let config = ServerConfig {
+        sam3_runtime: Sam3RuntimeKind::Native,
+        sam3_checkpoint: Some(temp.path().join("missing.pt")),
+        sam3_config: Some(config_path),
+        ..ServerConfig::default()
+    };
 
     let err = model_spec_from_config(&config).expect_err("missing checkpoint should fail");
     assert!(matches!(
@@ -74,10 +82,12 @@ fn native_spec_requires_existing_config_file() {
     let checkpoint_path = temp.path().join("sam3.pt");
     std::fs::write(&checkpoint_path, "fake-checkpoint").expect("write checkpoint");
 
-    let mut config = ServerConfig::default();
-    config.sam3_runtime = Sam3RuntimeKind::Native;
-    config.sam3_checkpoint = Some(checkpoint_path);
-    config.sam3_config = Some(temp.path().join("missing.json"));
+    let config = ServerConfig {
+        sam3_runtime: Sam3RuntimeKind::Native,
+        sam3_checkpoint: Some(checkpoint_path),
+        sam3_config: Some(temp.path().join("missing.json")),
+        ..ServerConfig::default()
+    };
 
     let err = model_spec_from_config(&config).expect_err("missing config should fail");
     assert!(matches!(
@@ -94,10 +104,12 @@ fn native_spec_requires_checkpoint_to_be_a_file() {
     let config_path = temp.path().join("config.json");
     std::fs::write(&config_path, "{}").expect("write config");
 
-    let mut config = ServerConfig::default();
-    config.sam3_runtime = Sam3RuntimeKind::Native;
-    config.sam3_checkpoint = Some(checkpoint_dir);
-    config.sam3_config = Some(config_path);
+    let config = ServerConfig {
+        sam3_runtime: Sam3RuntimeKind::Native,
+        sam3_checkpoint: Some(checkpoint_dir),
+        sam3_config: Some(config_path),
+        ..ServerConfig::default()
+    };
 
     let err = model_spec_from_config(&config).expect_err("directory checkpoint should fail");
     assert!(matches!(
@@ -114,10 +126,12 @@ fn native_spec_requires_config_to_be_a_file() {
     let config_dir = temp.path().join("config_dir");
     std::fs::create_dir_all(&config_dir).expect("create config dir");
 
-    let mut config = ServerConfig::default();
-    config.sam3_runtime = Sam3RuntimeKind::Native;
-    config.sam3_checkpoint = Some(checkpoint_path);
-    config.sam3_config = Some(config_dir);
+    let config = ServerConfig {
+        sam3_runtime: Sam3RuntimeKind::Native,
+        sam3_checkpoint: Some(checkpoint_path),
+        sam3_config: Some(config_dir),
+        ..ServerConfig::default()
+    };
 
     let err = model_spec_from_config(&config).expect_err("directory config should fail");
     assert!(matches!(
@@ -134,10 +148,12 @@ fn native_spec_requires_non_empty_checkpoint_file() {
     std::fs::write(&checkpoint_path, "").expect("write empty checkpoint");
     std::fs::write(&config_path, "{}").expect("write config");
 
-    let mut config = ServerConfig::default();
-    config.sam3_runtime = Sam3RuntimeKind::Native;
-    config.sam3_checkpoint = Some(checkpoint_path);
-    config.sam3_config = Some(config_path);
+    let config = ServerConfig {
+        sam3_runtime: Sam3RuntimeKind::Native,
+        sam3_checkpoint: Some(checkpoint_path),
+        sam3_config: Some(config_path),
+        ..ServerConfig::default()
+    };
 
     let err = model_spec_from_config(&config).expect_err("empty checkpoint should fail");
     assert!(matches!(
@@ -154,10 +170,12 @@ fn native_spec_requires_json_config_file() {
     std::fs::write(&checkpoint_path, "fake-checkpoint").expect("write checkpoint");
     std::fs::write(&config_path, "not-json").expect("write invalid config");
 
-    let mut config = ServerConfig::default();
-    config.sam3_runtime = Sam3RuntimeKind::Native;
-    config.sam3_checkpoint = Some(checkpoint_path);
-    config.sam3_config = Some(config_path);
+    let config = ServerConfig {
+        sam3_runtime: Sam3RuntimeKind::Native,
+        sam3_checkpoint: Some(checkpoint_path),
+        sam3_config: Some(config_path),
+        ..ServerConfig::default()
+    };
 
     let err = model_spec_from_config(&config).expect_err("invalid config json should fail");
     assert!(matches!(

@@ -1,8 +1,7 @@
-//! HVAT Axum Server Entry Point
+//! HVAT Axum server entrypoint with deterministic mock SAM backend.
 //!
-//! Run with: `cargo run -p hvat_backend --bin hvat_backend -- --data-dir /path/to/images`
-//!
-//! Use `--help` to see all options.
+//! This is used for E2E integration testing where real SAM model artifacts are
+//! unavailable or too heavy.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,11 +15,12 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use hvat_backend::full_sam::config::CliArgs;
+use hvat_backend::full_sam::sam::{mock_expected_files, mock_factory, mock_model_name};
+use hvat_backend::full_sam::state::SamBackendWiring;
 use hvat_backend::full_sam::{AppState, ServerConfig, pregenerate_pyramids, routes};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -29,35 +29,39 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Parse CLI arguments
     let args = CliArgs::parse();
+    let mut config = ServerConfig::from_cli(args)?;
+    config.sam_enabled = true;
 
-    // Load configuration from CLI
-    let config = ServerConfig::from_cli(args)?;
-    tracing::info!("Starting HVAT server with config: {:?}", config);
+    tracing::info!("Starting HVAT mock SAM server with config: {:?}", config);
     tracing::info!(
         "Project: {} ({})",
         config.project_name,
         config.data_dir.display()
     );
 
-    // Create application state
-    let state = Arc::new(AppState::new(config.clone())?);
+    let state = Arc::new(AppState::new_with_sam_wiring(
+        config.clone(),
+        SamBackendWiring {
+            backend_name: "mock-sam",
+            model_id: "sam-mock",
+            model_name: mock_model_name,
+            expected_files: mock_expected_files,
+            create_backend: mock_factory,
+        },
+    )?);
 
-    // Pre-generate pyramids/thumbnails in background so startup is non-blocking.
     let pregen_state = state.clone();
     tokio::spawn(async move {
         pregenerate_pyramids(pregen_state).await;
     });
 
-    // Build CORS layer for development
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any)
         .expose_headers(Any);
 
-    // Build the router
     let app = Router::new()
         .nest("/api", routes::api_router())
         .layer(CompressionLayer::new())
@@ -65,12 +69,10 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    // Start the server
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("Listening on http://{}", addr);
 
     axum::serve(listener, app).await?;
-
     Ok(())
 }

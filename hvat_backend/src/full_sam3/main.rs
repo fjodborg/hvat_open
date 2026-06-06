@@ -9,6 +9,7 @@ use std::sync::Arc;
 use axum::Router;
 use clap::Parser;
 use tokio::net::TcpListener;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -56,10 +57,12 @@ async fn main() -> anyhow::Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers(Any);
 
     let app = Router::new()
         .nest("/api", routes::api_router())
+        .layer(CompressionLayer::new())
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
