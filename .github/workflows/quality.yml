@@ -1,0 +1,32 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  clippy-touched:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Touched-File Clippy Gate (PR)
+        if: github.event_name == 'pull_request'
+        run: scripts/clippy_touched.sh "${{ github.event.pull_request.base.sha }}"
+
+      - name: Run Touched-File Clippy Gate (Push)
+        if: github.event_name != 'pull_request'
+        run: scripts/clippy_touched.sh "${{ github.event.before }}"

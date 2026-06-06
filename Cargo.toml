@@ -1,5 +1,14 @@
 [workspace]
-members = ["hvat_common", "hvat_leptos", "hvat_gpu", "hvat_backend", "hvat_visual_tests"]
+members = [
+    "hvat_common",
+    "hvat_leptos",
+    "hvat_gpu",
+    "hvat_backend",
+    "hvat_visual_tests",
+    "hvat_core",
+    "hvat_test_fakes",
+    "hvat_probe",
+]
 resolver = "2"
 
 # Workspace-level dependencies for version consistency
@@ -23,6 +32,9 @@ log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
+futures = { version = "0.3", default-features = false, features = ["std", "alloc", "executor", "async-await"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
 
 # Image processing
 image = "0.25"
