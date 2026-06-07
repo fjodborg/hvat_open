@@ -1,0 +1,967 @@
+openapi: 3.0.3
+
+info:
+  title: HVAT Backend API
+  version: "2"
+  description: |
+    REST API contract for HVAT-compatible backends.
+
+    Implement this API in any language to connect a custom backend to the HVAT frontend.
+
+    ## Minimum viable backend
+
+    Four endpoints are enough to browse and load images:
+
+    | Endpoint | Purpose |
+    |---|---|
+    | `GET /api/info` | Project metadata shown during connect |
+    | `GET /api/images` | Image list for the file browser |
+    | `GET /api/images/{id}/bands` | Binary pixel data for GPU upload |
+    | `GET /api/capabilities` | Feature flags that drive the frontend UI |
+
+    ## Capability profiles
+
+    Advertise what you support via `GET /api/capabilities`. The frontend adapts its UI
+    based on the returned `features` object and `models` array.
+
+    | Profile | Additional endpoints | Feature flags |
+    |---|---|---|
+    | `rest_core` | _(none beyond the four above)_ | all false |
+    | `rest_full` | project-state, download plan/parts, thumbnail | `project_state`, `downloads`, `thumbnails` |
+    | `rest_sam` | + `POST /api/sam/infer` | + `inference`, `sam` |
+
+    ## CORS
+
+    Custom backends **must** include `Access-Control-Expose-Headers: *` (or an explicit
+    list of every `X-Hvat-*` header) on `/api/images/{id}/bands` responses. Without this,
+    browsers block the frontend from reading the band payload metadata headers.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+tags:
+  - name: core
+    description: Required for all backends
+  - name: images
+    description: Image data endpoints
+  - name: project
+    description: Project state and file management
+  - name: downloads
+    description: Archive download endpoints
+  - name: sam
+    description: SAM segmentation inference
+  - name: monitoring
+    description: Telemetry (not called by the frontend)
+
+paths:
+
+  /api/info:
+    get:
+      tags: [core]
+      summary: Server / project metadata
+      description: Called during connect. Returns the project name and image count shown in the UI.
+      operationId: getInfo
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerInfoResponse"
+              example:
+                name: my-project
+                image_count: 42
+                version: "0.1.0"
+
+  /api/images:
+    get:
+      tags: [core, images]
+      summary: List all project images
+      description: |
+        Returns a stable, sorted array of all images in the project directory.
+        `id` values are opaque strings used as path parameters in all other image endpoints.
+      operationId: listImages
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ImageInfo"
+              example:
+                - id: "id:6e65737465642f696d6167652e706e67"
+                  name: "image.png"
+                  path: "nested/image.png"
+                  format: "PNG"
+
+  /api/images/{id}/bands:
+    get:
+      tags: [core, images]
+      summary: All bands packed as RGBA layers (binary)
+      description: |
+        Returns every spectral band packed into GPU-ready RGBA u8 layers.
+        **This is how the frontend loads every image.**
+
+        ### Packing rules
+
+        - Bands are grouped 4 per RGBA layer: layer `L`, channel `0..3` = band index `L*4 + channel`
+        - `num_layers = max(ceil(num_bands / 4), 2)` — minimum 2 layers (WebGL2 array-texture requirement)
+        - Band values are normalized to `[0.0, 1.0]` then scaled to `u8 [0, 255]`
+        - Incomplete last layer: unused band channels are `0`; alpha channel is `255`
+        - Layers are concatenated in ascending layer-index order
+
+        ### Body size
+
+        Exactly `width * height * 4 * num_layers` bytes.
+
+        ### CORS
+
+        Must include `Access-Control-Expose-Headers: *` so browsers can read the `X-Hvat-*` headers.
+      operationId: getImageBands
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Opaque image ID from `GET /api/images`
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Hvat-Width:
+              required: true
+              schema: { type: integer }
+              description: Image width in pixels
+            X-Hvat-Height:
+              required: true
+              schema: { type: integer }
+              description: Image height in pixels
+            X-Hvat-Num-Bands:
+              required: true
+              schema: { type: integer }
+              description: Total number of spectral bands
+            X-Hvat-Num-Layers:
+              required: true
+              schema: { type: integer }
+              description: Number of RGBA layers in the payload
+            X-Hvat-Payload:
+              required: true
+              schema: { type: string, enum: [rgba_layers_u8] }
+            X-Hvat-Layout:
+              required: true
+              schema: { type: string, enum: [layer-major] }
+            X-Hvat-Payload-Version:
+              required: true
+              schema: { type: string, enum: ["1"] }
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: "`width * height * 4 * num_layers` bytes"
+        "400":
+          description: Unsupported image format
+        "404":
+          description: Image not found
+        "500":
+          description: Load or pack failure
+
+  /api/capabilities:
+    get:
+      tags: [core]
+      summary: Server capabilities and model advertisement
+      description: |
+        Called during connect. `features` and `models` drive all optional frontend UI:
+        SAM tool, download panel, project-state save, thumbnail display.
+
+        Only advertise what you have implemented.
+
+        ### SAM UI requirements
+
+        For the SAM tool to appear, `features.sam` must be `true` **and** at least one
+        model in `models` must have:
+        - `type: segmentation`
+        - an input with `type: point_list`
+        - an output with `type: polygon_list`
+      operationId: getCapabilities
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerCapabilities"
+
+  /api/project-state:
+    get:
+      tags: [project]
+      summary: Load saved project annotations
+      description: |
+        Required when advertising `features.project_state = true`.
+        Return `404` when no state has been saved yet — the frontend treats this as normal.
+      operationId: getProjectState
+      responses:
+        "200":
+          description: Saved bundle
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Native HVAT annotation bundle JSON
+        "404":
+          description: No saved state (not an error)
+        "500":
+          description: Read failure
+    put:
+      tags: [project]
+      summary: Save project annotations
+      description: Required when advertising `features.project_state = true`.
+      operationId: putProjectState
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Native HVAT annotation bundle JSON
+      responses:
+        "204":
+          description: Saved
+        "400":
+          description: Invalid or empty payload
+        "413":
+          description: Payload too large (reference limit 64 MiB)
+        "500":
+          description: Write failure
+
+  /api/images/upload:
+    post:
+      tags: [project]
+      summary: Upload images to the server
+      operationId: uploadImages
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                target_root:
+                  type: string
+                  description: Optional subdirectory. Must appear before `files` fields if provided.
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: One or more files to upload
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          description: No files or malformed request
+        "500":
+          description: Write failure
+
+  /api/images/{id}/meta:
+    get:
+      tags: [images]
+      summary: Image metadata and pyramid status
+      description: Not currently consumed by the main frontend load flow. Informational.
+      operationId: getImageMeta
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageMetadataResponse"
+        "404":
+          description: Image not found
+        "500":
+          description: Load failure
+
+  /api/images/{id}/thumbnail:
+    get:
+      tags: [images]
+      summary: Thumbnail for tree/grid preview
+      description: |
+        Required when advertising `features.thumbnails = true`.
+        Return `404` while the thumbnail is not yet ready — the frontend retries gracefully.
+      operationId: getImageThumbnail
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: retry
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Cache-busting counter appended by the frontend on retries
+      responses:
+        "200":
+          description: OK
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Not ready or missing
+        "500":
+          description: Generation failure
+
+  /api/images/{id}/raw:
+    get:
+      tags: [images]
+      summary: Original source file bytes
+      operationId: getImageRaw
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Image not found
+        "500":
+          description: Read failure
+
+  /api/images/download:
+    get:
+      tags: [downloads]
+      summary: Download all images as a single ZIP
+      description: Alternative to the chunked download path.
+      operationId: downloadAllImages
+      responses:
+        "200":
+          description: OK
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: No images
+        "500":
+          description: Archive failure
+
+  /api/images/download/plan:
+    get:
+      tags: [downloads]
+      summary: Chunked download plan
+      description: |
+        Required when advertising `features.downloads = true`.
+        Returns a plan for downloading the project as multiple ZIP parts.
+        Use the same `part_size_mb` value when requesting each part.
+      operationId: getDownloadPlan
+      parameters:
+        - name: part_size_mb
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 256
+            minimum: 16
+            maximum: 1024
+          description: Part size in MB (reference server clamps to [16, 1024])
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadPlanResponse"
+        "404":
+          description: No images
+        "500":
+          description: Planning failure
+
+  /api/images/download/part/{part_index}:
+    get:
+      tags: [downloads]
+      summary: Download one ZIP part
+      description: |
+        `part_index` must be a value returned by the `/download/plan` response.
+        Use the same `part_size_mb` as in the plan request.
+      operationId: downloadPart
+      parameters:
+        - name: part_index
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: part_size_mb
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 256
+      responses:
+        "200":
+          description: OK
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Invalid part index or no images
+        "500":
+          description: Archive failure
+
+  /api/sam/infer:
+    post:
+      tags: [sam]
+      summary: Run SAM segmentation inference
+      description: |
+        Required when advertising `features.sam = true`.
+
+        ### Points format
+
+        `inputs.points` accepts two shapes:
+        - Object array: `[{"x": 1.0, "y": 2.0, "label": 1}, ...]`
+        - Coordinate pairs with parallel labels: `[[x, y], ...]` + `inputs.labels: [1, ...]`
+
+        `label` values: `1` = foreground, `0` = background.
+
+        ### Coordinates
+
+        All x/y values are image pixel coordinates (float, origin top-left).
+
+        ### Error codes
+
+        | HTTP | `code` | Meaning |
+        |---|---|---|
+        | 400 | `invalid_inputs` | Malformed points/labels |
+        | 400 | `model_not_found` | Unknown `model_id` |
+        | 404 | `image_not_found` | Unknown `image_id` |
+        | 500 | `model_prepare_failed` | Embedding computation failed |
+        | 500 | `inference_failed` | Inference failed |
+        | 503 | `model_unavailable` | No models registered |
+      operationId: samInfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SamInferRequest"
+            example:
+              model_id: "sam-base"
+              image_id: "id:abc123"
+              bands: { r: 0, g: 1, b: 2 }
+              inputs:
+                points:
+                  - { x: 120.5, y: 340.0, label: 1 }
+                box: [100.0, 100.0, 300.0, 400.0]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamInferResponse"
+              example:
+                masks: [[10.0, 10.0, 20.0, 10.0, 20.0, 20.0, 10.0, 20.0]]
+                scores: [0.93]
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamErrorResponse"
+        "404":
+          description: Image not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamErrorResponse"
+        "500":
+          description: Inference failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamErrorResponse"
+        "503":
+          description: No models available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamErrorResponse"
+
+  /api/sam/warm:
+    post:
+      tags: [sam]
+      summary: Pre-compute SAM image embedding
+      description: |
+        Optional. Called opportunistically after image load to reduce latency on the
+        first `/api/sam/infer` request. Return `202` whether warming is in progress
+        or already complete.
+      operationId: samWarm
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SamWarmRequest"
+      responses:
+        "202":
+          description: Accepted
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamErrorResponse"
+        "503":
+          description: No models available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamErrorResponse"
+
+  /api/metrics:
+    get:
+      tags: [monitoring]
+      summary: REST route telemetry snapshot
+      description: Not called by the frontend. Intended for dashboards and monitoring tools.
+      operationId: getMetrics
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsResponse"
+
+components:
+  schemas:
+
+    ServerInfoResponse:
+      type: object
+      required: [name, image_count, version]
+      properties:
+        name:
+          type: string
+        image_count:
+          type: integer
+        version:
+          type: string
+
+    ImageInfo:
+      type: object
+      required: [id, name, path]
+      properties:
+        id:
+          type: string
+          description: Stable opaque identifier. Use as `{id}` in path parameters.
+        name:
+          type: string
+          description: Display filename
+        path:
+          type: string
+          description: Project-relative path (no absolute paths)
+        format:
+          type: string
+          description: "File format string, e.g. PNG, NPY (informational)"
+
+    UploadResponse:
+      type: object
+      required: [uploaded, files]
+      properties:
+        uploaded:
+          type: integer
+        files:
+          type: array
+          items:
+            type: string
+          description: Project-relative paths of uploaded files
+
+    ImageMetadataResponse:
+      type: object
+      required: [id, name, format, width, height, bands, pyramid]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        format:
+          type: string
+        width:
+          type: integer
+        height:
+          type: integer
+        bands:
+          type: integer
+          description: Number of spectral bands
+        pyramid:
+          $ref: "#/components/schemas/PyramidInfo"
+
+    PyramidInfo:
+      type: object
+      required: [status, levels]
+      properties:
+        status:
+          type: string
+          enum: [ready, building, pending, failed]
+        levels:
+          type: array
+          items:
+            $ref: "#/components/schemas/PyramidLevel"
+
+    PyramidLevel:
+      type: object
+      required: [level, width, height]
+      properties:
+        level:
+          type: integer
+          description: "0 = full resolution; higher values are progressively downsampled"
+        width:
+          type: integer
+        height:
+          type: integer
+
+    DownloadPlanResponse:
+      type: object
+      required: [total_files, total_bytes, part_size_bytes, part_count, parts]
+      properties:
+        total_files:
+          type: integer
+        total_bytes:
+          type: integer
+          format: int64
+        part_size_bytes:
+          type: integer
+          format: int64
+        part_count:
+          type: integer
+        parts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DownloadPartInfo"
+
+    DownloadPartInfo:
+      type: object
+      required: [index, filename, file_count, total_bytes]
+      properties:
+        index:
+          type: integer
+        filename:
+          type: string
+        file_count:
+          type: integer
+        total_bytes:
+          type: integer
+          format: int64
+
+    ServerCapabilities:
+      type: object
+      required: [protocol_version, server, limits, models]
+      properties:
+        protocol_version:
+          type: integer
+          enum: [2]
+          description: Must be 2
+        server:
+          $ref: "#/components/schemas/ServerInfo"
+        limits:
+          $ref: "#/components/schemas/ServerLimits"
+        features:
+          $ref: "#/components/schemas/ServerFeatures"
+        download_mode:
+          type: string
+          enum: [single_zip, chunked, unknown]
+          description: |
+            Which download endpoints are available.
+            `single_zip` → `/api/images/download`
+            `chunked` → `/api/images/download/plan` + `/api/images/download/part/{index}`
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelCapability"
+      example:
+        protocol_version: 2
+        server: { name: "my-hvat-backend", version: "1.0.0" }
+        limits:
+          max_image_size: 4294967296
+          max_pyramid_levels: 8
+          max_concurrent_streams: 4
+          max_concurrent_inferences: 2
+        features:
+          project_state: true
+          downloads: true
+          thumbnails: true
+          inference: true
+          sam: true
+        download_mode: chunked
+        models:
+          - id: "sam-base"
+            name: "Segment Anything"
+            type: "segmentation"
+            inputs:
+              - { name: "points", type: "point_list", required: false }
+              - { name: "bbox",   type: "bbox",       required: false }
+            outputs:
+              - { name: "masks",  type: "polygon_list" }
+              - { name: "scores", type: "float_list" }
+            requires_embedding: true
+
+    ServerInfo:
+      type: object
+      required: [name, version]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+
+    ServerLimits:
+      type: object
+      properties:
+        max_image_size:
+          type: integer
+          format: int64
+        max_pyramid_levels:
+          type: integer
+        max_concurrent_streams:
+          type: integer
+        max_concurrent_inferences:
+          type: integer
+
+    ServerFeatures:
+      type: object
+      description: All fields default to `false` when omitted.
+      properties:
+        streaming:
+          type: boolean
+          description: Legacy WebSocket streaming (not required for REST-only backends)
+          default: false
+        project_state:
+          type: boolean
+          description: "`GET /api/project-state` and `PUT /api/project-state` are implemented"
+          default: false
+        downloads:
+          type: boolean
+          description: "`/api/images/download/plan` and `/download/part/{index}` are implemented"
+          default: false
+        thumbnails:
+          type: boolean
+          description: "`GET /api/images/{id}/thumbnail` is implemented"
+          default: false
+        inference:
+          type: boolean
+          description: Model inference is available
+          default: false
+        sam:
+          type: boolean
+          description: SAM segmentation is available; SAM tool shown in frontend
+          default: false
+        progressive_streaming:
+          type: boolean
+          description: Legacy WebSocket progressive streaming
+          default: false
+
+    ModelCapability:
+      type: object
+      required: [id, name, type, inputs, outputs]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          enum: [segmentation, detection, classification, feature, custom]
+        description:
+          type: string
+        inputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/IOSchema"
+        outputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/IOSchema"
+        requires_embedding:
+          type: boolean
+          default: false
+          description: If true, the backend pre-computes an embedding before inference
+        embedding_time_ms:
+          type: integer
+          description: Approximate embedding time in ms (shown in the frontend)
+
+    IOSchema:
+      type: object
+      required: [name, type]
+      description: |
+        Describes one input or output field. The frontend selects models based on these types.
+
+        Recognised `type` values for SAM:
+        - `point_list` — click-based point prompts
+        - `bbox` — bounding-box prompt
+        - `polygon_list` — segmentation mask output (flat vertex array)
+        - `float_list` — per-mask confidence scores
+      properties:
+        name:
+          type: string
+          description: Field name used in request/response bodies
+        type:
+          type: string
+        required:
+          type: boolean
+          default: false
+
+    SamInferRequest:
+      type: object
+      required: [model_id, image_id, inputs]
+      properties:
+        model_id:
+          type: string
+        image_id:
+          type: string
+        bands:
+          $ref: "#/components/schemas/BandSelection"
+        inputs:
+          $ref: "#/components/schemas/SamInputs"
+
+    SamWarmRequest:
+      type: object
+      required: [model_id, image_id]
+      properties:
+        model_id:
+          type: string
+        image_id:
+          type: string
+        bands:
+          $ref: "#/components/schemas/BandSelection"
+
+    BandSelection:
+      type: object
+      description: Which spectral bands to use as RGB channels for the model input. Defaults to {r:0, g:1, b:2}.
+      properties:
+        r: { type: integer, default: 0 }
+        g: { type: integer, default: 1 }
+        b: { type: integer, default: 2 }
+
+    SamInputs:
+      type: object
+      description: |
+        At least one of `points` or `box` must be provided.
+
+        `points` accepts two formats:
+        - **Object array**: `[{"x": 1.0, "y": 2.0, "label": 1}, ...]`
+        - **Coordinate pairs**: `[[x, y], ...]` with a parallel `labels` array
+
+        `label`: `1` = foreground, `0` = background.
+      properties:
+        points:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/SamPointObject"
+            - type: array
+              items:
+                type: array
+                items: { type: number }
+                minItems: 2
+                maxItems: 2
+        labels:
+          type: array
+          items:
+            type: integer
+            enum: [0, 1]
+          description: Required when using the coordinate-pair points format
+        box:
+          type: array
+          items: { type: number }
+          minItems: 4
+          maxItems: 4
+          description: "[x1, y1, x2, y2] in image pixel coordinates"
+
+    SamPointObject:
+      type: object
+      required: [x, y, label]
+      properties:
+        x: { type: number }
+        y: { type: number }
+        label:
+          type: integer
+          enum: [0, 1]
+
+    SamInferResponse:
+      type: object
+      required: [masks]
+      properties:
+        masks:
+          type: array
+          items:
+            type: array
+            items: { type: number }
+          description: |
+            Flattened polygon vertex arrays: `[[x1,y1,x2,y2,...], ...]`
+            Coordinates are image pixel values (float, origin top-left).
+        scores:
+          type: array
+          items: { type: number }
+          description: Per-mask confidence scores (optional)
+
+    SamErrorResponse:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+          enum:
+            - invalid_inputs
+            - model_not_found
+            - image_not_found
+            - unsupported_format
+            - model_prepare_failed
+            - inference_failed
+            - model_unavailable
+            - internal_error
+
+    MetricsResponse:
+      type: object
+      properties:
+        image_bands:
+          $ref: "#/components/schemas/EndpointMetrics"
+        sam_infer:
+          $ref: "#/components/schemas/EndpointMetrics"
+        sam_warm:
+          $ref: "#/components/schemas/EndpointMetrics"
+
+    EndpointMetrics:
+      type: object
+      properties:
+        requests:    { type: integer, format: int64 }
+        errors:      { type: integer, format: int64 }
+        avg_latency_ms: { type: integer, format: int64 }
+        max_latency_ms: { type: integer, format: int64 }

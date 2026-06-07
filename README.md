@@ -86,11 +86,15 @@ UPDATE_BASELINES=true cargo test -p hvat_visual_tests
 cd hvat_leptos && TRUNK_BUILD_FEATURES="test-events" trunk build
 ```
 
-## Protocol and Integration Docs
+## Building a Custom Backend
 
-- `PROTOCOL.md`: canonical WebSocket protocol spec
-- `CUSTOM_BACKEND_BOUNDARY.md`: minimum compatibility contract for custom backends
-- `CUSTOM_BACKEND_API_REFERENCE.md`: HTTP + WebSocket API reference
+**`openapi.yaml`** is the single reference for implementing a compatible backend in another language. It covers all endpoints, request/response schemas, and the CORS requirement for the binary band payload.
+
+Paste it into [editor.swagger.io](https://editor.swagger.io) or any OpenAPI viewer to browse it interactively.
+
+The minimum viable backend is four endpoints: `GET /api/info`, `GET /api/images`, `GET /api/images/{id}/bands`, and `GET /api/capabilities`. WebSocket is a legacy compatibility path and not required.
+
+`PROTOCOL.md` is the normative internal contract (kept in sync with the codebase, referenced by `AGENTS.md`).
 
 ## Capability-First Backend Contract
 
