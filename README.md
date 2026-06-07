@@ -27,9 +27,39 @@ cargo build
 ### Frontend (WASM)
 
 ```bash
-cd hvat_leptos && trunk build
+cd hvat_leptos && trunk build                              # debug (54 MB, for dev)
+cd hvat_leptos && trunk build --cargo-profile release-dev # optimised (8.8 MB, fast compile)
+cd hvat_leptos && trunk build --release                   # release (7 MB)
 cd hvat_leptos && trunk serve
 ```
+
+#### Optional: wasm-opt
+
+Installing [wasm-opt](https://github.com/WebAssembly/binaryen) reduces the release WASM by ~430 KB (5.9%). Trunk picks it up automatically when it is on `PATH`.
+
+```bash
+# openSUSE / SUSE
+sudo zypper install binaryen
+
+# Ubuntu / Debian
+sudo apt install binaryen
+
+# macOS
+brew install binaryen
+
+# Cargo (cross-platform, slower)
+cargo install wasm-opt
+```
+
+**Measured impact** (release build, before vs. after wasm-opt):
+
+| File | Before | After | Saved |
+|---|---|---|---|
+| `hvat_leptos_bg.wasm` | 7.3 MB | 6.9 MB | 430 KB (5.9%) |
+| `image-decoder-worker_bg.wasm` | 1.0 MB | 961 KB | 49 KB (4.8%) |
+| Gzipped (main) | 2.09 MB | 2.08 MB | 14 KB (0.7%) |
+
+The gain is modest because `opt-level = 3` + `lto = "thin"` in the release profile already does most of the work. The biggest size win is using `--release` instead of the debug default (54 MB → 7 MB).
 
 ### Backend (from repo root)
 
