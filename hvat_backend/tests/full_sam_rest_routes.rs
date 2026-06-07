@@ -31,6 +31,19 @@ fn create_test_png() -> Vec<u8> {
     bytes
 }
 
+fn create_large_test_png() -> Vec<u8> {
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(512, 512, |x, y| {
+        let r = (x % 256) as u8;
+        let g = (y % 256) as u8;
+        let b = ((x + y) % 256) as u8;
+        Rgb([r, g, b])
+    });
+    let mut bytes = Vec::new();
+    img.write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .expect("encode large png");
+    bytes
+}
+
 fn create_test_multiband_npy() -> Vec<u8> {
     let arr = Array3::from_shape_fn((7, 6, 5), |(band, y, x)| {
         ((band * 100 + y * 10 + x) as f32) / 1000.0
@@ -61,6 +74,11 @@ async fn setup_test_server() -> Option<TestContext> {
 
     std::fs::write(temp_dir.path().join("test_image.png"), create_test_png())
         .expect("write root image");
+    std::fs::write(
+        temp_dir.path().join("large_image.png"),
+        create_large_test_png(),
+    )
+    .expect("write large root image");
     std::fs::write(
         temp_dir.path().join("hyper_7band.npy"),
         create_test_multiband_npy(),
@@ -180,7 +198,7 @@ async fn rest_info_images_and_capabilities_work() {
         .expect("fetch images");
     assert!(images.status().is_success());
     let images_json: serde_json::Value = images.json().await.expect("decode images");
-    assert_eq!(images_json.as_array().map(Vec::len), Some(3));
+    assert_eq!(images_json.as_array().map(Vec::len), Some(4));
 
     let caps = client
         .get(format!("http://{}/api/capabilities", ctx.addr))
@@ -288,6 +306,39 @@ async fn rest_image_bands_reports_total_source_band_count_for_multiband_inputs()
             .and_then(|h| h.to_str().ok())
             .unwrap_or_default(),
         "2"
+    );
+}
+
+#[tokio::test]
+async fn rest_image_bands_supports_compression_negotiation() {
+    let Some(ctx) = setup_test_server().await else {
+        return;
+    };
+    let client = reqwest::Client::builder()
+        .no_brotli()
+        .no_deflate()
+        .no_gzip()
+        .build()
+        .expect("build reqwest client");
+    let image_id = fetch_image_id_by_name(&client, ctx.addr, "large_image.png").await;
+
+    let resp = client
+        .get(format!("http://{}/api/images/{}/bands", ctx.addr, image_id))
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+        .send()
+        .await
+        .expect("fetch bands");
+    assert!(resp.status().is_success());
+
+    let encoding = resp
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert_eq!(
+        encoding, "gzip",
+        "expected gzip content-encoding when requested"
     );
 }
 
