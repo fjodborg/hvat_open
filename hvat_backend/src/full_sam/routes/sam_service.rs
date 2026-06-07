@@ -38,18 +38,22 @@ impl SamBands {
 }
 
 /// Resolve SAM band selection against image metadata so keys are canonical.
+///
+/// Returns `(resolved_bands, width, height)` from a single metadata read,
+/// allowing callers to skip a separate `load_metadata` call for dimensions.
 pub(crate) async fn resolve_sam_bands(
     state: &AppState,
     image_id: &str,
     requested: SamBands,
-) -> Result<SamBands, Error> {
+) -> Result<(SamBands, u32, u32), Error> {
     let image_path = find_image(state, image_id)?;
     let loader = state
         .loaders
         .find_loader(&image_path)
         .ok_or_else(|| Error::UnsupportedFormat(image_id.to_string()))?;
     let metadata = loader.load_metadata(&image_path).await?;
-    Ok(requested.clamp_to_num_bands(metadata.num_bands))
+    let resolved = requested.clamp_to_num_bands(metadata.num_bands);
+    Ok((resolved, metadata.width, metadata.height))
 }
 
 /// Load image with specific band selection for RGB channels.

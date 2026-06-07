@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::band_cache::CachedBandLayers;
 use crate::common::archive::{
     ArchiveError, DownloadPartInfo, DownloadPlanResponse, DownloadQuery,
     build_chunked_download_plan, build_images_zip, build_project_archive, resolve_part_size_bytes,
@@ -94,21 +95,39 @@ async fn get_bands(
             )
         })?;
 
-        let band_data = loader.load_bands(&image_path).await.map_err(|e| {
+        let image_hash = compute_image_hash(&image_path).map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to load image bands: {}", e),
+                format!("Failed to compute image hash: {}", e),
             )
         })?;
 
-        let layers = build_full_layers(&band_data).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to build display payload: {}", e),
-            )
-        })?;
+        let cached = if let Some(hit) = state.band_cache.get(&image_hash).await {
+            hit
+        } else {
+            let band_data = loader.load_bands(&image_path).await.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to load image bands: {}", e),
+                )
+            })?;
+            let layers = build_full_layers(&band_data).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to build display payload: {}", e),
+                )
+            })?;
+            let entry = Arc::new(CachedBandLayers {
+                layers,
+                width: band_data.width,
+                height: band_data.height,
+                num_bands: band_data.num_bands(),
+            });
+            state.band_cache.insert(image_hash, entry.clone()).await;
+            entry
+        };
 
-        let payload = flatten_layers(&layers);
+        let payload = flatten_layers(&cached.layers);
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -117,7 +136,7 @@ async fn get_bands(
         );
         headers.insert(
             "X-Hvat-Width",
-            HeaderValue::from_str(&band_data.width.to_string()).map_err(|e| {
+            HeaderValue::from_str(&cached.width.to_string()).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Header encoding failed: {}", e),
@@ -126,7 +145,7 @@ async fn get_bands(
         );
         headers.insert(
             "X-Hvat-Height",
-            HeaderValue::from_str(&band_data.height.to_string()).map_err(|e| {
+            HeaderValue::from_str(&cached.height.to_string()).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Header encoding failed: {}", e),
@@ -135,7 +154,7 @@ async fn get_bands(
         );
         headers.insert(
             "X-Hvat-Num-Bands",
-            HeaderValue::from_str(&band_data.num_bands().to_string()).map_err(|e| {
+            HeaderValue::from_str(&cached.num_bands.to_string()).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Header encoding failed: {}", e),
@@ -144,7 +163,7 @@ async fn get_bands(
         );
         headers.insert(
             "X-Hvat-Num-Layers",
-            HeaderValue::from_str(&layers.len().to_string()).map_err(|e| {
+            HeaderValue::from_str(&cached.layers.len().to_string()).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Header encoding failed: {}", e),
@@ -584,25 +603,14 @@ mod tests {
     }
 
     #[test]
-    fn build_rgb_layers_clamps_requested_indices() {
+    fn build_full_layers_packs_all_bands() {
         let data = sample_band_data();
-        let requested = RgbBands {
-            red: 99,
-            green: 1,
-            blue: 2,
-        };
-
-        let (resolved, layers) = build_rgb_layers(&data, requested).expect("layers");
-
-        assert_eq!(
-            resolved,
-            RgbBands {
-                red: 2,
-                green: 1,
-                blue: 2
-            }
-        );
+        let layers = build_full_layers(&data).expect("layers");
         assert_eq!(layers.len(), data.num_layers() as usize);
+        let layer_size = (data.width * data.height * 4) as usize;
+        for (_, bytes) in &layers {
+            assert_eq!(bytes.len(), layer_size);
+        }
     }
 
     #[test]

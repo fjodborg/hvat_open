@@ -12,7 +12,6 @@ use crate::full_sam::routes::sam_service::{
     SamBands, load_image_rgb_with_bands, resolve_sam_bands,
 };
 use crate::state::AppState;
-use crate::utils::find_image;
 
 #[derive(Debug, Deserialize)]
 struct SamInferRequest {
@@ -127,14 +126,11 @@ async fn post_infer(
         })?;
 
         let requested_bands = SamBands::from(request.bands);
-        let resolved_bands = resolve_sam_bands(&state, &request.image_id, requested_bands)
-            .await
-            .map_err(map_image_error)?;
+        let (resolved_bands, width, height) =
+            resolve_sam_bands(&state, &request.image_id, requested_bands)
+                .await
+                .map_err(map_image_error)?;
         let embedding_key = resolved_bands.embedding_key(&request.image_id);
-
-        let (width, height) = resolve_image_dimensions(&state, &request.image_id)
-            .await
-            .map_err(map_image_error)?;
 
         if backend.requires_embedding() && !backend.is_prepared(&embedding_key).await {
             let (rgb_data, prep_w, prep_h, _) = load_image_rgb_with_bands(
@@ -233,7 +229,7 @@ async fn post_warm(
         })?;
 
         let requested_bands = SamBands::from(request.bands);
-        let resolved_bands = resolve_sam_bands(&state, &request.image_id, requested_bands)
+        let (resolved_bands, _, _) = resolve_sam_bands(&state, &request.image_id, requested_bands)
             .await
             .map_err(map_image_error)?;
         let embedding_key = resolved_bands.embedding_key(&request.image_id);
@@ -339,16 +335,6 @@ fn normalize_inputs(inputs: &SamInputsRequest) -> Result<Value, String> {
         "points": points,
         "box": inputs.box_prompt,
     }))
-}
-
-async fn resolve_image_dimensions(state: &AppState, image_id: &str) -> Result<(u32, u32), Error> {
-    let image_path = find_image(state, image_id)?;
-    let loader = state
-        .loaders
-        .find_loader(&image_path)
-        .ok_or_else(|| Error::UnsupportedFormat(image_id.to_string()))?;
-    let metadata = loader.load_metadata(&image_path).await?;
-    Ok((metadata.width, metadata.height))
 }
 
 fn map_image_error(err: Error) -> (StatusCode, Json<ErrorResponse>) {

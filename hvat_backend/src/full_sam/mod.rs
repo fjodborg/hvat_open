@@ -1,5 +1,6 @@
 //! Full HVAT backend mode with REST image loading and SAM inference.
 
+pub mod band_cache;
 pub mod config;
 pub mod error;
 pub mod inference;

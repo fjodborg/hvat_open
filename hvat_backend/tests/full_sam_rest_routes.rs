@@ -91,6 +91,7 @@ async fn setup_test_server() -> Option<TestContext> {
         sam_variant: SamVariant::Tiny,
         sam_provider: ExecutionProvider::Cpu,
         sam_cache_size: 8,
+        band_cache_size: 4,
     };
 
     let state = Arc::new(AppState::new(config).expect("init app state"));

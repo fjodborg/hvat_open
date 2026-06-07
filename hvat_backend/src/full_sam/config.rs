@@ -48,6 +48,10 @@ pub struct CliArgs {
     /// Maximum cached image embeddings for SAM
     #[arg(long, env = "HVAT_SAM_CACHE_SIZE", default_value = "50")]
     pub sam_cache_size: usize,
+
+    /// Maximum number of images to keep in the packed-layer band cache
+    #[arg(long, env = "HVAT_BAND_CACHE_SIZE", default_value = "4")]
+    pub band_cache_size: usize,
 }
 
 /// Configuration parsing and validation errors.
@@ -90,6 +94,9 @@ pub struct ServerConfig {
 
     /// Maximum cached embeddings
     pub sam_cache_size: usize,
+
+    /// Maximum number of images in the packed-layer band cache
+    pub band_cache_size: usize,
 }
 
 impl Deref for ServerConfig {
@@ -112,6 +119,7 @@ impl Default for ServerConfig {
             sam_variant: SamVariant::default(),
             sam_provider: ExecutionProvider::default(),
             sam_cache_size: 50,
+            band_cache_size: 4,
         }
     }
 }
@@ -157,6 +165,7 @@ impl ServerConfig {
             sam_variant,
             sam_provider,
             sam_cache_size: args.sam_cache_size,
+            band_cache_size: args.band_cache_size,
         })
     }
 

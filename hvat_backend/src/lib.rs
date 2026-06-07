@@ -21,6 +21,7 @@ pub use full_sam::ServerConfig;
 pub use full_sam::pregenerate_pyramids;
 
 // Keep module paths stable while exposing the new full_sam namespace.
+pub use full_sam::band_cache;
 pub use full_sam::config;
 pub use full_sam::error;
 pub use full_sam::inference;

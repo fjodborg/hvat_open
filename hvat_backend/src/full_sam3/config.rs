@@ -330,6 +330,7 @@ impl ServerConfig {
             sam_variant: self.sam_variant,
             sam_provider: self.sam_provider,
             sam_cache_size: self.sam_cache_size,
+            band_cache_size: 4,
         }
     }
 }

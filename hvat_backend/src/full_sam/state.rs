@@ -9,6 +9,7 @@ use serde::Serialize;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
+use crate::band_cache::PackedLayerCache;
 use crate::config::ServerConfig;
 use crate::inference::{ModelRegistry, SamInferenceAdapter};
 use crate::loaders::ImageLoaderRegistry;
@@ -204,6 +205,9 @@ pub struct AppState {
 
     /// REST route telemetry counters for dashboarding.
     pub rest_metrics: RestRouteMetrics,
+
+    /// Packed RGBA layer cache — avoids re-decoding image files on every band request.
+    pub band_cache: PackedLayerCache,
 }
 
 impl AppState {
@@ -270,6 +274,7 @@ impl AppState {
         };
 
         Ok(Self {
+            band_cache: PackedLayerCache::new(config.band_cache_size),
             config,
             loaders,
             pyramid_storage,
