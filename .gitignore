@@ -21,6 +21,7 @@ debug/
 # TODO: remove these once settled on assets
 .cache
 hvat_visual_tests/test_output/
+hvat_visual_tests/test_input/
 
 # Temporary working notes and test artifacts
 ARCHITECTURE.md

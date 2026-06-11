@@ -260,14 +260,16 @@ paths:
                     format: binary
                   description: One or more files to upload
       responses:
-        "200":
-          description: OK
+        "201":
+          description: Created
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/UploadResponse"
         "400":
           description: No files or malformed request
+        "413":
+          description: A file exceeds the per-file upload size limit
         "500":
           description: Write failure
 
@@ -460,9 +462,11 @@ paths:
         |---|---|---|
         | 400 | `invalid_inputs` | Malformed points/labels |
         | 400 | `model_not_found` | Unknown `model_id` |
+        | 400 | `unsupported_format` | Image format cannot be decoded |
         | 404 | `image_not_found` | Unknown `image_id` |
         | 500 | `model_prepare_failed` | Embedding computation failed |
         | 500 | `inference_failed` | Inference failed |
+        | 500 | `internal_error` | Unexpected server-side failure |
         | 503 | `model_unavailable` | No models registered |
       operationId: samInfer
       requestBody:
@@ -533,7 +537,19 @@ paths:
         "202":
           description: Accepted
         "400":
-          description: Invalid request
+          description: Invalid request or unknown `model_id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamErrorResponse"
+        "404":
+          description: Image not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SamErrorResponse"
+        "500":
+          description: Embedding computation failed (`model_prepare_failed`)
           content:
             application/json:
               schema:
@@ -575,7 +591,7 @@ components:
 
     ImageInfo:
       type: object
-      required: [id, name, path]
+      required: [id, name, path, format]
       properties:
         id:
           type: string
@@ -725,10 +741,11 @@ components:
             type: "segmentation"
             inputs:
               - { name: "points", type: "point_list", required: false }
-              - { name: "bbox",   type: "bbox",       required: false }
+              - { name: "box",    type: "bbox",        required: false }
             outputs:
               - { name: "masks",  type: "polygon_list" }
               - { name: "scores", type: "float_list" }
+            options: {}
             requires_embedding: true
 
     ServerInfo:
@@ -799,42 +816,88 @@ components:
           enum: [segmentation, detection, classification, feature, custom]
         description:
           type: string
+          default: ""
         inputs:
           type: array
           items:
-            $ref: "#/components/schemas/IOSchema"
+            $ref: "#/components/schemas/InputSchema"
         outputs:
           type: array
           items:
-            $ref: "#/components/schemas/IOSchema"
+            $ref: "#/components/schemas/OutputSchema"
+        options:
+          type: object
+          description: |
+            Map of configurable model parameter name → schema. Always present
+            (may be an empty object). The reference SAM model emits `{}`.
+          additionalProperties:
+            $ref: "#/components/schemas/OptionSchema"
         requires_embedding:
           type: boolean
           default: false
           description: If true, the backend pre-computes an embedding before inference
         embedding_time_ms:
           type: integer
+          default: 0
           description: Approximate embedding time in ms (shown in the frontend)
 
-    IOSchema:
+    InputSchema:
       type: object
       required: [name, type]
       description: |
-        Describes one input or output field. The frontend selects models based on these types.
+        Describes one model input field. The frontend selects models based on these types.
 
         Recognised `type` values for SAM:
         - `point_list` — click-based point prompts
         - `bbox` — bounding-box prompt
-        - `polygon_list` — segmentation mask output (flat vertex array)
-        - `float_list` — per-mask confidence scores
       properties:
         name:
           type: string
-          description: Field name used in request/response bodies
+          description: Field name used in request bodies
         type:
           type: string
         required:
           type: boolean
           default: false
+        description:
+          type: string
+          default: ""
+
+    OutputSchema:
+      type: object
+      required: [name, type]
+      description: |
+        Describes one model output field.
+
+        Recognised `type` values for SAM:
+        - `polygon_list` — segmentation mask output (flat vertex array)
+        - `float_list` — per-mask confidence scores
+      properties:
+        name:
+          type: string
+          description: Field name used in response bodies
+        type:
+          type: string
+        description:
+          type: string
+          default: ""
+
+    OptionSchema:
+      type: object
+      required: [type]
+      description: Schema for one configurable model parameter.
+      properties:
+        type:
+          type: string
+        default:
+          description: Default value (any JSON type), omitted when unset
+        description:
+          type: string
+          default: ""
+        min:
+          type: number
+        max:
+          type: number
 
     SamInferRequest:
       type: object
@@ -950,6 +1013,7 @@ components:
 
     MetricsResponse:
       type: object
+      required: [image_bands, sam_infer, sam_warm]
       properties:
         image_bands:
           $ref: "#/components/schemas/EndpointMetrics"
@@ -960,6 +1024,7 @@ components:
 
     EndpointMetrics:
       type: object
+      required: [requests, errors, avg_latency_ms, max_latency_ms]
       properties:
         requests:    { type: integer, format: int64 }
         errors:      { type: integer, format: int64 }
