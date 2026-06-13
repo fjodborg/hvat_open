@@ -10,7 +10,7 @@ This is in the process of being migrated from a monolithic binary to a more modu
 
 Before using SAM3 backend please read the license: [sam3 license](https://github.com/facebookresearch/sam3?tab=License-1-ov-file#readme).
 
-License is not fully decided yet, but for i just put AGPL on it, i might make it MIT later.
+License is not fully decided yet, but for now i just put AGPL on it, i might make it MIT later.
 
 ## Repository Contents
 
