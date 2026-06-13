@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Release Binaries
+        run: |
+          cargo build --locked --release -p hvat_backend \
+            --bin hvat_backend \
+            --bin hvat_backend_sam3
+
+      - name: Package Release Archives
+        run: |
+          mkdir -p dist/hvat-backend-linux-x86_64
+          mkdir -p dist/hvat-backend-sam3-linux-x86_64
+
+          install -m 755 target/release/hvat_backend \
+            dist/hvat-backend-linux-x86_64/
+          install -m 755 target/release/hvat_backend_sam3 \
+            dist/hvat-backend-sam3-linux-x86_64/
+
+          cp LICENSE README.md PROTOCOL.md openapi.yaml \
+            dist/hvat-backend-linux-x86_64/
+          cp LICENSE README.md PROTOCOL.md openapi.yaml \
+            dist/hvat-backend-sam3-linux-x86_64/
+
+          tar -C dist -czf dist/hvat-backend-linux-x86_64.tar.gz \
+            hvat-backend-linux-x86_64
+          tar -C dist -czf dist/hvat-backend-sam3-linux-x86_64.tar.gz \
+            hvat-backend-sam3-linux-x86_64
+
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Upload Release Assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/hvat-backend-linux-x86_64.tar.gz
+            dist/hvat-backend-sam3-linux-x86_64.tar.gz
+            dist/SHA256SUMS

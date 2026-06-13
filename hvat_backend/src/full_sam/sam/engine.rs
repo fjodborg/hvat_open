@@ -187,10 +187,18 @@ impl OnnxSamEngine {
                 vec![ROCmExecutionProvider::default().build().error_on_failure()]
             }
             ExecutionProvider::DirectML => {
-                vec![DirectMLExecutionProvider::default().build().error_on_failure()]
+                vec![
+                    DirectMLExecutionProvider::default()
+                        .build()
+                        .error_on_failure(),
+                ]
             }
             ExecutionProvider::CoreML => {
-                vec![CoreMLExecutionProvider::default().build().error_on_failure()]
+                vec![
+                    CoreMLExecutionProvider::default()
+                        .build()
+                        .error_on_failure(),
+                ]
             }
             // Cross-platform, vendor-neutral GPU path (Dawn → Vulkan/D3D12). No
             // cuDNN/TensorRT dependency. Left at defaults: graph capture and
@@ -198,7 +206,11 @@ impl OnnxSamEngine {
             // (the SAM2 decoder runs many ops on CPU fallback, which interacts
             // badly with those options) — see `gpu_matches_cpu_reference`.
             ExecutionProvider::WebGpu => {
-                vec![WebGPUExecutionProvider::default().build().error_on_failure()]
+                vec![
+                    WebGPUExecutionProvider::default()
+                        .build()
+                        .error_on_failure(),
+                ]
             }
         }
     }
@@ -1055,9 +1067,7 @@ mod real_model_tests {
             .expect("crate dir has a parent")
             .join(".cache/models");
         assert!(
-            model_dir
-                .join(SamVariant::Tiny.encoder_filename())
-                .exists(),
+            model_dir.join(SamVariant::Tiny.encoder_filename()).exists(),
             "missing SAM Tiny models in {}",
             model_dir.display()
         );
@@ -1087,8 +1097,16 @@ mod real_model_tests {
         // capture replaying the previous image's computation).
         // (label, image, prompt-point-at-object-center)
         let images = [
-            ("A", synth_shape_image(w, h, (250, 150, 550, 450)), [400.0, 300.0]),
-            ("B", synth_shape_image(w, h, (100, 100, 300, 300)), [200.0, 200.0]),
+            (
+                "A",
+                synth_shape_image(w, h, (250, 150, 550, 450)),
+                [400.0, 300.0],
+            ),
+            (
+                "B",
+                synth_shape_image(w, h, (100, 100, 300, 300)),
+                [200.0, 200.0],
+            ),
         ];
 
         let mut max_embed_diff = 0.0f32;
@@ -1124,11 +1142,10 @@ mod real_model_tests {
                 .await
                 .expect("gpu decode");
 
+            println!("\n=== {} vs CPU, image {label} ===", gpu_provider.name());
             println!(
-                "\n=== {} vs CPU, image {label} ===",
-                gpu_provider.name()
+                "image_embed      : max_abs={img_max:.5}  mean_abs={img_mean:.6}  (cpu |max|={cpu_absmax:.3})"
             );
-            println!("image_embed      : max_abs={img_max:.5}  mean_abs={img_mean:.6}  (cpu |max|={cpu_absmax:.3})");
             println!("high_res_feats   : max_abs h0={h0_max:.5}  h1={h1_max:.5}");
             // Bounding box of the largest polygon — tells us whether the mask is
             // in the same place/shape (vs just a noisier contour of it).

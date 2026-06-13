@@ -1,7 +1,7 @@
 //! Shared utilities for HVAT crates.
 //!
-//! This crate provides common functionality used across hvat_backend, hvat_leptos,
-//! and hvat_gpu to avoid code duplication and ensure consistent behavior.
+//! This crate defines the protocol, annotation exchange formats, and data
+//! utilities shared by the HVAT backend and compatible clients.
 
 pub mod annotation_io;
 pub mod binary;

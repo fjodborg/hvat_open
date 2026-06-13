@@ -1,118 +1,82 @@
-# HVAT
+# HVAT Open Backend
 
-Hyperspectral Visualization and Annotation Tool.
+Public backend services and wire contracts for HVAT, the Hyperspectral
+Visualization and Annotation Tool.
 
-HVAT is a GPU-accelerated system for viewing and annotating hyperspectral and RGB images, with a Leptos/WebGPU frontend and an Axum backend.
+The browser frontend and GPU renderer are maintained separately and are not
+part of this repository.
 
-## Demo
+## Repository Contents
 
-[Live demo](https://fjodborg.github.io/hvat/)
+- `hvat_backend`: Axum REST server, image loaders, project persistence,
+  pyramid generation, SAM inference, and executable entry points.
+- `hvat_common`: Protocol types, structured errors, annotation exchange
+  formats, binary helpers, and shared image data utilities.
+- `openapi.yaml`: Machine-readable REST API specification.
+- `PROTOCOL.md`: Normative protocol behavior and compatibility requirements.
 
-## Workspace
+## Binaries
 
-- `hvat_leptos`: frontend (Leptos CSR + Thaw + WebGPU)
-- `hvat_backend`: backend (Axum + `/api/ws` multiplexed protocol)
-- `hvat_common`: shared protocol/error/data types
-- `hvat_gpu`: rendering layer shared by frontend/tests
-- `hvat_visual_tests`: visual and E2E tests
+- `hvat_backend`: Primary REST backend with optional SAM2 inference.
+- `hvat_backend_sam3`: SAM3 backend entry point. Its default compatibility
+  runtime uses the SAM2 ONNX artifacts.
+- `simple`: Compatibility backend enabled with the `legacy-ws` feature.
+- `hvat_backend_mock_sam`: Deterministic development and integration-test
+  backend. It is not included in public release archives.
 
-## Quick Start
-
-```bash
-# Format and build workspace
-cargo fmt --all
-cargo build
-```
-
-### Frontend (WASM)
-
-```bash
-cd hvat_leptos && trunk build                              # debug (54 MB, for dev)
-cd hvat_leptos && trunk build --cargo-profile release-dev # optimised (8.8 MB, fast compile)
-cd hvat_leptos && trunk build --release                   # release (7 MB)
-cd hvat_leptos && trunk serve
-```
-
-#### Optional: wasm-opt
-
-Installing [wasm-opt](https://github.com/WebAssembly/binaryen) reduces the release WASM by ~430 KB (5.9%). Trunk picks it up automatically when it is on `PATH`.
+## Build
 
 ```bash
-# openSUSE / SUSE
-sudo zypper install binaryen
-
-# Ubuntu / Debian
-sudo apt install binaryen
-
-# macOS
-brew install binaryen
-
-# Cargo (cross-platform, slower)
-cargo install wasm-opt
+cargo build --release -p hvat_backend --bin hvat_backend
+cargo build --release -p hvat_backend --bin hvat_backend_sam3
 ```
 
-**Measured impact** (release build, before vs. after wasm-opt):
+The workspace uses the Rust toolchain declared in `rust-toolchain.toml`.
 
-| File | Before | After | Saved |
-|---|---|---|---|
-| `hvat_leptos_bg.wasm` | 7.3 MB | 6.9 MB | 430 KB (5.9%) |
-| `image-decoder-worker_bg.wasm` | 1.0 MB | 961 KB | 49 KB (4.8%) |
-| Gzipped (main) | 2.09 MB | 2.08 MB | 14 KB (0.7%) |
+## Run
 
-The gain is modest because `opt-level = 3` + `lto = "thin"` in the release profile already does most of the work. The biggest size win is using `--release` instead of the debug default (54 MB → 7 MB).
-
-### Backend (from repo root)
-
-Cargo aliases are defined in `.cargo/config.toml`.
+Serve images without SAM:
 
 ```bash
-cargo serve
-cargo serve-sam
-cargo serve-sam3
-cargo serve-debug
+cargo serve -- --data-dir /path/to/images
 ```
 
-### Visual Tests
+Enable SAM2:
 
 ```bash
-cargo test -p hvat_visual_tests
-HEADLESS=false cargo test -p hvat_visual_tests -- --nocapture
-UPDATE_BASELINES=true cargo test -p hvat_visual_tests
+cargo serve -- \
+  --data-dir /path/to/images \
+  --sam-enabled \
+  --sam-variant tiny
 ```
 
-### Test Event Build (frontend)
+When SAM is enabled, missing ONNX artifacts are downloaded from the model
+source declared in `hvat_backend/src/full_sam/sam/models.rs` and cached in
+`.cache/models`. Override that location with `--sam-model-dir` or
+`HVAT_SAM_MODEL_DIR`.
 
-```bash
-cd hvat_leptos && TRUNK_BUILD_FEATURES="test-events" trunk build
-```
+Model files are not stored in this repository and are not included in release
+archives. Review the upstream model license before downloading or
+redistributing model artifacts.
 
-## Building a Custom Backend
+Native SAM3 mode requires explicit `--sam3-checkpoint` and `--sam3-config`
+paths. Those artifacts are not downloaded automatically.
 
-**`openapi.yaml`** is the single reference for implementing a compatible backend in another language. It covers all endpoints, request/response schemas, and the CORS requirement for the binary band payload.
+## API Compatibility
 
-Paste it into [editor.swagger.io](https://editor.swagger.io) or any OpenAPI viewer to browse it interactively.
+REST implementations and clients should use `openapi.yaml` as the
+machine-readable contract and `PROTOCOL.md` for normative behavior that is not
+fully expressed by OpenAPI.
 
-The minimum viable backend is four endpoints: `GET /api/info`, `GET /api/images`, `GET /api/images/{id}/bands`, and `GET /api/capabilities`. WebSocket is a legacy compatibility path and not required.
+Any REST route or schema change must update both documents in the same change.
 
-`PROTOCOL.md` is the normative internal contract (kept in sync with the codebase, referenced by `AGENTS.md`).
+## Releases
 
-## Capability-First Backend Contract
+Version tags build Linux x86-64 archives for `hvat_backend` and
+`hvat_backend_sam3`. Release archives contain executables, documentation, and
+checksums only. They never contain model artifacts.
 
-- Frontend/backend interoperability is capability-driven, not backend-name driven.
-- Backends are replaceable as long as they advertise compatible capability schemas.
-- Frontend must use capability-declared input/output field names and types, never hardcoded model IDs.
-- Universal behavior agreement is expressed through:
-  - server-level feature flags (for example, streaming, project state, downloads),
-  - model input/output type combinations (for example, point-to-mask, bbox-to-mask, point+bbox-to-mask).
-- Protocol/docs are a development guideline during implementation and should be aligned before release candidates.
+## License
 
-## Active Planning Docs
-
-- `SAM3_BACKEND_PLAN.md`: active SAM3 backend roadmap and execution plan
-- `docs/sam3_code_change_map.md`: file-level SAM3 implementation checklist
-- `streaming_plan.md`: current streaming/navigation orchestration plan
-
-## Notes
-
-- WebSocket communication is multiplexed on `/api/ws`.
-- `hvat_leptos` stays on Rust 2021 (wasm-bindgen constraint); other crates use Rust 2024.
+`hvat_backend` and `hvat_common` are licensed under the GNU Affero General
+Public License v3.0. See `LICENSE`.

@@ -1,39 +1,10 @@
-# Enable bulk memory operations for WASM (required for panic=unwind)
-[target.wasm32-unknown-unknown]
-rustflags = ["-C", "target-feature=+bulk-memory"]
-
-# Avoid using all my resources when doing other things at the same time
 [build]
 jobs = 4
 
-# Limit test threads to avoid RAM exhaustion (each visual test spawns Chrome + warp server)
-# With the lightweight warp static file server, we can now run tests in parallel.
 [env]
 RUST_TEST_THREADS = "4"
 
-# Cargo aliases for common commands
 [alias]
-# Run hvat_backend (full_sam mode) with release-dev profile (fast compile, good perf)
-serve-backend-full = "run --profile release-dev -p hvat_backend --bin hvat_backend -- --data-dir hvat_visual_tests/test_input"
-# Run hvat_backend in full_sam mode with SAM enabled
-serve-backend-full-sam = "run --profile release-dev -p hvat_backend --bin hvat_backend --features sam-cuda -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
-# Run hvat_backend in full_sam3 mode with SAM enabled
-serve-backend-full-sam3 = "run --profile release-dev -p hvat_backend --bin hvat_backend_sam3 --features sam-cuda -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
-# Run hvat_backend full_sam mode in debug
-serve-backend-full-debug = "run -p hvat_backend --bin hvat_backend -- --data-dir hvat_visual_tests/test_input"
-# Run hvat_backend full_sam mode with short ping intervals for keepalive testing
-serve-backend-full-test-keepalive = "run --profile release-dev -p hvat_backend --bin hvat_backend -- --data-dir hvat_visual_tests/test_input --ping-interval 5 --connection-timeout 15 --max-connections 3"
-# Run the simple backend mode (single crate, simple binary)
-serve-backend-simple = "run --profile release-dev -p hvat_backend --bin simple -- --data-dir hvat_visual_tests/test_input"
-
-# Backwards-compatible aliases
-serve = "run --profile release-dev -p hvat_backend --bin hvat_backend -- --data-dir hvat_visual_tests/test_input"
-serve-sam = "run --profile release-dev -p hvat_backend --bin hvat_backend --features sam-cuda -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
-# Cross-platform GPU build (WebGPU EP, no cuDNN/TensorRT). Mutually exclusive with sam-cuda.
-serve-sam-webgpu = "run --profile release-dev -p hvat_backend --bin hvat_backend --features sam-webgpu -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
-serve-sam3 = "run --profile release-dev -p hvat_backend --bin hvat_backend_sam3 --features sam-cuda -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
-# SAM3 compat backend on the cross-platform WebGPU build (no cuDNN/TensorRT).
-serve-sam3-webgpu = "run --profile release-dev -p hvat_backend --bin hvat_backend_sam3 --features sam-webgpu -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
-serve-debug = "run -p hvat_backend --bin hvat_backend -- --data-dir hvat_visual_tests/test_input"
-serve-test-keepalive = "run --profile release-dev -p hvat_backend --bin hvat_backend -- --data-dir hvat_visual_tests/test_input --ping-interval 5 --connection-timeout 15 --max-connections 3"
-serve-simple = "run --profile release-dev -p hvat_backend --bin simple -- --data-dir hvat_visual_tests/test_input"
+serve = "run --profile release-dev -p hvat_backend --bin hvat_backend"
+serve-sam3 = "run --profile release-dev -p hvat_backend --bin hvat_backend_sam3"
+serve-simple = "run --profile release-dev -p hvat_backend --bin simple --features legacy-ws"

@@ -15,27 +15,12 @@
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 target/
-dist/
 debug/
 
-# TODO: remove these once settled on assets
-.cache
-hvat_visual_tests/test_output/
-hvat_visual_tests/test_input/
+# Runtime data, generated pyramids, and downloaded model artifacts
+.cache/
+data/
 
-# Temporary working notes and test artifacts
-ARCHITECTURE.md
-CURRENT.md
-IMPLEMENTATION_SUMMARY.md
-PHASE1_COMPLETE.md
-PHASE2_COMPLETE.md
-REFACTORING_SUMMARY.md
-TOAST_FIX_SUMMARY.md
-WEBSOCKET_EXTENSIBILITY_ANALYSIS.md
-implementation.md
-streaming_plan.md
-plan.md
-CLEANUP.md
-todo
-test.log
-test_multiband.npy
+# Local development artifacts
+*.log
+*.npy

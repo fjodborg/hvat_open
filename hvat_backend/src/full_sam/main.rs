@@ -16,6 +16,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use hvat_backend::full_sam::config::CliArgs;
+use hvat_backend::full_sam::sam::models::ensure_models;
 use hvat_backend::full_sam::{AppState, ServerConfig, pregenerate_pyramids, routes};
 
 #[tokio::main]
@@ -40,6 +41,10 @@ async fn main() -> anyhow::Result<()> {
         config.project_name,
         config.data_dir.display()
     );
+
+    if config.sam_enabled {
+        ensure_models(&config.sam_model_dir, config.sam_variant).await?;
+    }
 
     // Create application state
     let state = Arc::new(AppState::new(config.clone())?);

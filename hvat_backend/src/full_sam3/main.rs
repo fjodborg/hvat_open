@@ -15,7 +15,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use hvat_backend::full_sam3::{
-    CliArgs, ServerConfig, build_app_state, pregenerate_pyramids, routes,
+    CliArgs, Sam3RuntimeKind, ServerConfig, build_app_state, pregenerate_pyramids, routes,
 };
 
 #[tokio::main]
@@ -45,6 +45,14 @@ async fn main() -> anyhow::Result<()> {
             "Resolved SAM model directory: {}",
             resolved_model_dir.display()
         );
+    }
+
+    if config.sam_enabled && config.sam3_runtime == Sam3RuntimeKind::CompatOnnx {
+        hvat_backend::full_sam::sam::models::ensure_models(
+            &config.sam_model_dir,
+            config.sam_variant,
+        )
+        .await?;
     }
 
     let state = Arc::new(build_app_state(config.clone())?);
