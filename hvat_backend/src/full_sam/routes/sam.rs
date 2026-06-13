@@ -98,6 +98,12 @@ async fn post_infer(
     Json(request): Json<SamInferRequest>,
 ) -> Result<Json<SamInferResponse>, (StatusCode, Json<ErrorResponse>)> {
     let started = std::time::Instant::now();
+    log::info!(
+        "SAM /infer request received: model_id={}, image_id={}",
+        request.model_id,
+        request.image_id
+    );
+    let (mut load_ms, mut prepare_ms, mut infer_ms) = (0u128, 0u128, 0u128);
     let outcome: Result<_, (StatusCode, Json<ErrorResponse>)> = async {
         let registry = state.model_registry.as_ref().ok_or_else(|| {
             api_err(
@@ -133,6 +139,7 @@ async fn post_infer(
         let embedding_key = resolved_bands.embedding_key(&request.image_id);
 
         if backend.requires_embedding() && !backend.is_prepared(&embedding_key).await {
+            let load_start = std::time::Instant::now();
             let (rgb_data, prep_w, prep_h, _) = load_image_rgb_with_bands(
                 &state,
                 &request.image_id,
@@ -142,6 +149,7 @@ async fn post_infer(
             )
             .await
             .map_err(map_image_error)?;
+            load_ms = load_start.elapsed().as_millis();
 
             let prepare_image = ImageContext {
                 image_id: embedding_key.clone(),
@@ -150,6 +158,7 @@ async fn post_infer(
                 height: prep_h,
             };
 
+            let prepare_start = std::time::Instant::now();
             backend.prepare(&prepare_image, None).await.map_err(|e| {
                 api_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -157,6 +166,7 @@ async fn post_infer(
                     "model_prepare_failed",
                 )
             })?;
+            prepare_ms = prepare_start.elapsed().as_millis();
         }
 
         let infer_image = ImageContext {
@@ -177,6 +187,7 @@ async fn post_infer(
             }
         });
 
+        let infer_start = std::time::Instant::now();
         let result = backend
             .infer(&infer_image, normalized_inputs, options, None)
             .await
@@ -187,6 +198,7 @@ async fn post_infer(
                     "inference_failed",
                 )
             })?;
+        infer_ms = infer_start.elapsed().as_millis();
 
         let masks = result
             .outputs
@@ -200,6 +212,15 @@ async fn post_infer(
     .await;
 
     let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    log::info!(
+        "SAM /infer request complete: image_id={}, ok={}, total={}ms (load={}ms, prepare={}ms, infer={}ms)",
+        request.image_id,
+        outcome.is_ok(),
+        elapsed_ms,
+        load_ms,
+        prepare_ms,
+        infer_ms,
+    );
     state
         .rest_metrics
         .record_sam_infer(elapsed_ms, outcome.is_ok());
@@ -211,6 +232,13 @@ async fn post_warm(
     Json(request): Json<SamWarmRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let started = std::time::Instant::now();
+    log::info!(
+        "SAM /warm request received: model_id={}, image_id={}",
+        request.model_id,
+        request.image_id
+    );
+    let mut load_ms = 0u128;
+    let mut prepare_ms = 0u128;
     let outcome: Result<_, (StatusCode, Json<ErrorResponse>)> = async {
         let registry = state.model_registry.as_ref().ok_or_else(|| {
             api_err(
@@ -235,6 +263,7 @@ async fn post_warm(
         let embedding_key = resolved_bands.embedding_key(&request.image_id);
 
         if backend.requires_embedding() && !backend.is_prepared(&embedding_key).await {
+            let load_start = std::time::Instant::now();
             let (rgb_data, width, height, _) = load_image_rgb_with_bands(
                 &state,
                 &request.image_id,
@@ -244,12 +273,14 @@ async fn post_warm(
             )
             .await
             .map_err(map_image_error)?;
+            load_ms = load_start.elapsed().as_millis();
             let prepare_image = ImageContext {
                 image_id: embedding_key,
                 rgb_data,
                 width,
                 height,
             };
+            let prepare_start = std::time::Instant::now();
             backend.prepare(&prepare_image, None).await.map_err(|e| {
                 api_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -257,6 +288,7 @@ async fn post_warm(
                     "model_prepare_failed",
                 )
             })?;
+            prepare_ms = prepare_start.elapsed().as_millis();
         }
 
         Ok(StatusCode::ACCEPTED)
@@ -264,6 +296,14 @@ async fn post_warm(
     .await;
 
     let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    log::info!(
+        "SAM /warm request complete: image_id={}, ok={}, total={}ms (load={}ms, prepare={}ms)",
+        request.image_id,
+        outcome.is_ok(),
+        elapsed_ms,
+        load_ms,
+        prepare_ms,
+    );
     state
         .rest_metrics
         .record_sam_warm(elapsed_ms, outcome.is_ok());
@@ -373,6 +413,7 @@ fn api_err(
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use axum::{
@@ -591,5 +632,181 @@ mod tests {
 
         let response = app.oneshot(request).await.expect("response");
         assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    /// Counts encode/decode calls so tests can assert how many times the
+    /// (expensive) embedding step vs. the (cheap) decode step ran.
+    static COUNTING_ENCODE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static COUNTING_DECODE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    struct CountingSamBackend;
+
+    #[async_trait]
+    impl SamBackend for CountingSamBackend {
+        fn name(&self) -> &'static str {
+            "counting-sam"
+        }
+
+        fn provider(&self) -> ExecutionProvider {
+            ExecutionProvider::Cpu
+        }
+
+        async fn encode_image(
+            &self,
+            _image_rgb: &[u8],
+            _width: u32,
+            _height: u32,
+        ) -> anyhow::Result<EncoderOutput> {
+            COUNTING_ENCODE_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(EncoderOutput::BackendSpecific {
+                backend_name: "counting-sam".to_string(),
+                format: "mock-v1".to_string(),
+                data: vec![1],
+            })
+        }
+
+        async fn decode_mask(
+            &self,
+            _encoder_output: &EncoderOutput,
+            original_width: u32,
+            original_height: u32,
+            _points: &[SamPoint],
+            _box_prompt: Option<[f32; 4]>,
+        ) -> anyhow::Result<SamMaskResult> {
+            COUNTING_DECODE_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(SamMaskResult {
+                masks: vec![vec![0u8; (original_width * original_height) as usize]],
+                polygons: vec![vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]],
+                iou_scores: vec![0.9],
+                width: original_width,
+                height: original_height,
+            })
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    fn counting_factory(_: &ServerConfig) -> anyhow::Result<Arc<dyn SamBackend>> {
+        Ok(Arc::new(CountingSamBackend))
+    }
+
+    /// Builds a router backed by [`CountingSamBackend`] with two distinct
+    /// images available, so embedding-cache behavior can be exercised
+    /// across separate `image_id`s.
+    async fn make_counting_router() -> (Router, Vec<String>, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        for name in ["sample_a.png", "sample_b.png"] {
+            let image_path = temp_dir.path().join(name);
+            let mut img = image::RgbImage::new(64, 48);
+            for pixel in img.pixels_mut() {
+                *pixel = image::Rgb([100, 150, 200]);
+            }
+            img.save(&image_path).expect("save sample image");
+        }
+
+        let mut config = ServerConfig {
+            sam_enabled: true,
+            ..ServerConfig::default()
+        };
+        config.base.data_dir = temp_dir.path().to_path_buf();
+        config.base.project_name = "sam-counting-test".to_string();
+        let state = AppState::new_with_sam_wiring(
+            config,
+            SamBackendWiring {
+                backend_name: "counting-backend",
+                model_id: "sam-counting",
+                model_name: mock_model_name,
+                expected_files: mock_expected_files,
+                create_backend: counting_factory,
+            },
+        )
+        .expect("state init");
+
+        let mut image_ids: Vec<String> =
+            crate::common::catalog::list_supported_images(&state.config.data_dir, |path| {
+                state.loaders.find_loader(path).is_some()
+            })
+            .into_iter()
+            .map(|info| info.id)
+            .collect();
+        image_ids.sort();
+        assert_eq!(image_ids.len(), 2, "expected two test images");
+
+        (
+            Router::new()
+                .nest("/api/sam", super::router())
+                .with_state(Arc::new(state)),
+            image_ids,
+            temp_dir,
+        )
+    }
+
+    async fn infer_with_point(app: &Router, image_id: &str, point: [f32; 2]) -> StatusCode {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/sam/infer")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "model_id": "sam-counting",
+                    "image_id": image_id,
+                    "bands": { "r": 0, "g": 1, "b": 2 },
+                    "inputs": {
+                        "points": [point],
+                        "labels": [1]
+                    }
+                }))
+                .expect("serialize"),
+            ))
+            .expect("request");
+
+        app.clone()
+            .oneshot(request)
+            .await
+            .expect("response")
+            .status()
+    }
+
+    /// Exercises the embedding cache across multiple images and prompts:
+    /// 1 embedding + 2 segmentations on image A, then 1 new embedding
+    /// + 3 segmentations on image B. The encoder should run exactly once
+    /// per image (cached across prompts), while the decoder should run
+    /// once per segmentation request.
+    #[tokio::test]
+    async fn multiple_embeddings_and_segmentations() {
+        let _ = env_logger::Builder::new()
+            .filter_level(log::LevelFilter::Info)
+            .is_test(true)
+            .try_init();
+
+        COUNTING_ENCODE_CALLS.store(0, Ordering::SeqCst);
+        COUNTING_DECODE_CALLS.store(0, Ordering::SeqCst);
+
+        let (app, image_ids, _temp_dir) = make_counting_router().await;
+        let image_a = &image_ids[0];
+        let image_b = &image_ids[1];
+
+        // Image A: first request computes the embedding, second reuses it.
+        assert_eq!(
+            infer_with_point(&app, image_a, [10.0, 10.0]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            infer_with_point(&app, image_a, [20.0, 20.0]).await,
+            StatusCode::OK
+        );
+
+        assert_eq!(COUNTING_ENCODE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(COUNTING_DECODE_CALLS.load(Ordering::SeqCst), 2);
+
+        // Image B: new embedding, then three segmentations reusing it.
+        for point in [[5.0, 5.0], [15.0, 15.0], [25.0, 25.0]] {
+            assert_eq!(infer_with_point(&app, image_b, point).await, StatusCode::OK);
+        }
+
+        assert_eq!(COUNTING_ENCODE_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(COUNTING_DECODE_CALLS.load(Ordering::SeqCst), 5);
     }
 }

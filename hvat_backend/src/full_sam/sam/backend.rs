@@ -26,6 +26,11 @@ pub enum ExecutionProvider {
     DirectML,
     /// Apple CoreML acceleration.
     CoreML,
+    /// Cross-platform WebGPU acceleration (Dawn → Vulkan/D3D12).
+    ///
+    /// Vendor-neutral GPU path requiring no cuDNN/TensorRT; works on any GPU
+    /// exposing Vulkan (Linux) or D3D12 (Windows).
+    WebGpu,
 }
 
 /// Error returned when parsing an invalid execution provider string.
@@ -36,7 +41,7 @@ impl fmt::Display for ParseExecutionProviderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown execution provider '{}', expected one of: cpu, cuda, rocm, directml, coreml",
+            "unknown execution provider '{}', expected one of: cpu, cuda, rocm, directml, coreml, webgpu",
             self.0
         )
     }
@@ -54,6 +59,7 @@ impl FromStr for ExecutionProvider {
             "rocm" => Ok(Self::Rocm),
             "directml" => Ok(Self::DirectML),
             "coreml" => Ok(Self::CoreML),
+            "webgpu" => Ok(Self::WebGpu),
             _ => Err(ParseExecutionProviderError(s.to_string())),
         }
     }
@@ -68,6 +74,7 @@ impl ExecutionProvider {
             Self::Rocm => "ROCm",
             Self::DirectML => "DirectML",
             Self::CoreML => "CoreML",
+            Self::WebGpu => "WebGPU",
         }
     }
 }

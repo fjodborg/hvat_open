@@ -42,6 +42,11 @@ required-features = ["legacy-ws"]
 [features]
 default = []
 sam-cuda = ["ort/cuda"]
+# Cross-platform, vendor-neutral GPU acceleration via ONNX Runtime's WebGPU EP
+# (Dawn → Vulkan on Linux, D3D12 on Windows). No cuDNN/TensorRT dependency.
+# Mutually exclusive with `sam-cuda`: each pulls a different prebuilt onnxruntime
+# binary (there is no combined wgpu+cu12 dist), so enable only one at a time.
+sam-webgpu = ["ort/webgpu"]
 legacy-ws = []
 
 [dependencies]
@@ -98,6 +103,7 @@ log = { workspace = true }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 tempfile = "3"
+env_logger = "0.11"
 
 [lints]
 workspace = true

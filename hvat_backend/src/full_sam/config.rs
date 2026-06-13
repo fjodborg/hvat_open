@@ -41,7 +41,7 @@ pub struct CliArgs {
     #[arg(long, env = "HVAT_SAM_VARIANT", default_value = "tiny")]
     pub sam_variant: String,
 
-    /// SAM execution provider: auto, cpu, cuda, rocm, directml, coreml
+    /// SAM execution provider: auto, cpu, cuda, rocm, directml, coreml, webgpu
     #[arg(long, env = "HVAT_SAM_PROVIDER", default_value = "auto")]
     pub sam_provider: String,
 

@@ -29,7 +29,11 @@ serve-backend-simple = "run --profile release-dev -p hvat_backend --bin simple -
 # Backwards-compatible aliases
 serve = "run --profile release-dev -p hvat_backend --bin hvat_backend -- --data-dir hvat_visual_tests/test_input"
 serve-sam = "run --profile release-dev -p hvat_backend --bin hvat_backend --features sam-cuda -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
+# Cross-platform GPU build (WebGPU EP, no cuDNN/TensorRT). Mutually exclusive with sam-cuda.
+serve-sam-webgpu = "run --profile release-dev -p hvat_backend --bin hvat_backend --features sam-webgpu -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
 serve-sam3 = "run --profile release-dev -p hvat_backend --bin hvat_backend_sam3 --features sam-cuda -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
+# SAM3 compat backend on the cross-platform WebGPU build (no cuDNN/TensorRT).
+serve-sam3-webgpu = "run --profile release-dev -p hvat_backend --bin hvat_backend_sam3 --features sam-webgpu -- --data-dir hvat_visual_tests/test_input --sam-enabled --sam-variant tiny"
 serve-debug = "run -p hvat_backend --bin hvat_backend -- --data-dir hvat_visual_tests/test_input"
 serve-test-keepalive = "run --profile release-dev -p hvat_backend --bin hvat_backend -- --data-dir hvat_visual_tests/test_input --ping-interval 5 --connection-timeout 15 --max-connections 3"
 serve-simple = "run --profile release-dev -p hvat_backend --bin simple -- --data-dir hvat_visual_tests/test_input"
