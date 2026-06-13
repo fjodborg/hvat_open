@@ -3,8 +3,7 @@
 Public backend services and wire contracts for HVAT, the Hyperspectral
 Visualization and Annotation Tool.
 
-The browser frontend and GPU renderer are maintained separately and are not
-part of this repository.
+The browser frontend and GPU renderer are maintained separately and are not. But the binary will be deployed/released as part of this repository.
 
 ## Work in progress
 This is in the process of being migrated from a monolithic binary to a more modular approach. I expect to finish the migration during the next few days and then i'll continue on adding features. 
