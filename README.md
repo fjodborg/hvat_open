@@ -12,6 +12,15 @@ Before using SAM3 backend please read the license: [sam3 license](https://github
 
 License is not fully decided yet, but for now i just put AGPL on it, i might make it MIT later.
 
+## Try HVAT
+
+- [Open the live demo](https://fjodborg.github.io/hvat_open/)
+- [Download the latest backend binaries and compiled frontend](https://github.com/fjodborg/hvat_open/releases/latest)
+
+The live demo is a compiled browser frontend deployed from a release artifact.
+Its source code is maintained separately. Connect it to an HVAT-compatible
+backend that is reachable from your browser.
+
 ## Repository Contents
 
 - `hvat_backend`: Axum REST server, image loaders, project persistence,
@@ -79,8 +88,9 @@ Any REST route or schema change must update both documents in the same change.
 ## Releases
 
 Version tags build Linux x86-64 archives for `hvat_backend` and
-`hvat_backend_sam3`. Release archives contain executables, documentation, and
-checksums only. They never contain model artifacts.
+`hvat_backend_sam3`. Releases can also contain the compiled browser frontend.
+Release archives contain executables or compiled static assets, documentation,
+and checksums only. They never contain model artifacts.
 
 ## License
 

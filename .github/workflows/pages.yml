@@ -1,0 +1,93 @@
+name: Deploy Live Demo
+
+on:
+  repository_dispatch:
+    types:
+      - frontend-release
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Frontend release tag to deploy, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy compiled frontend
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Resolve release tag
+        id: release
+        env:
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          MANUAL_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${DISPATCH_TAG:-${MANUAL_TAG:-}}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v0.1.0 or v0.1.0-rc.1" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Download compiled frontend
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="hvat-frontend-wasm-${TAG}.tar.gz"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$archive" \
+            --dir release
+
+          mkdir -p site
+          tar -C site --strip-components=1 -xzf "release/${archive}"
+
+      - name: Verify Pages artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f site/index.html
+          test -f site/manifest.json
+          test -f site/RELEASE.json
+
+          if find site -type f \
+            \( -name '*.rs' -o -name '*.onnx' -o -name '*.pt' \
+            -o -name '*.pth' -o -name '*.safetensors' \) \
+            -print -quit | grep -q .
+          then
+            echo "Unexpected source or model artifact in Pages payload" >&2
+            exit 1
+          fi
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
